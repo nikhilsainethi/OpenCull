@@ -18,6 +18,7 @@ public enum ImageLoader {
 
     /// Decodes an upright (orientation applied) image whose longest side is at most `maxPixelSize`.
     public static func loadImage(url: URL, maxPixelSize: Int) -> CGImage? {
+        guard maxPixelSize > 0, maxPixelSize <= 100_000 else { return nil }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
             return nil
         }
@@ -121,7 +122,7 @@ public enum ImageLoader {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
         guard t.count == 6, let sign = t.first, sign == "+" || sign == "-" else { return nil }
         let parts = t.dropFirst().split(separator: ":")
-        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]), (0...23).contains(h), (0...59).contains(m) else { return nil }
         return (sign == "-" ? -1 : 1) * (h * 3600 + m * 60)
     }
 }

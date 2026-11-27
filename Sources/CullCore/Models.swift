@@ -71,15 +71,15 @@ public struct FaceInfo: Codable, Sendable, Equatable {
 /// Everything measured about one photo. Expensive to compute, so it is cached.
 public struct PhotoAnalysis: Codable, Sendable, Equatable {
     /// Bump this when the analysis changes so old cached results are recomputed.
-    public static let currentVersion = 2
+    public static let currentVersion = 3
 
     public var version: Int = PhotoAnalysis.currentVersion
     public var pixelWidth: Int
     public var pixelHeight: Int
     public var captureDate: Date?
-    /// Sharpness of the sharpest parts of the frame (mean Laplacian variance of the top tiles).
+    /// Denoised focus detail with minimum spatial tile support (not a calibrated probability).
     public var sharpness: Float
-    /// Sharpness of the main subject: the largest significant face if any, otherwise `sharpness`.
+    /// Weakest measurable significant face focus, otherwise the robust whole-frame measure.
     public var subjectSharpness: Float
     /// Mean luminance, 0...1.
     public var meanLuminance: Float
@@ -96,11 +96,16 @@ public struct PhotoAnalysis: Codable, Sendable, Equatable {
     public var featurePrint: Embedding?
     /// Low-resolution brightness layout, robust to blur. Used together with `featurePrint`.
     public var layoutSignature: Embedding?
+    /// Explicit diagnostics; an unavailable Vision measurement is not a negative detection.
+    public var analysisWarnings: [String]
+    /// Local Vision classification labels used by text search.
+    public var labels: [String]
+    public var noiseLevel: Float?
 
     public init(pixelWidth: Int, pixelHeight: Int, captureDate: Date?, sharpness: Float, subjectSharpness: Float,
                 meanLuminance: Float, highlightClipping: Float, shadowClipping: Float, faces: [FaceInfo],
                 aestheticScore: Float? = nil, isUtility: Bool? = nil, featurePrint: Embedding? = nil,
-                layoutSignature: Embedding? = nil) {
+                layoutSignature: Embedding? = nil, analysisWarnings: [String] = [], labels: [String] = [], noiseLevel: Float? = nil) {
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
         self.captureDate = captureDate
@@ -114,6 +119,23 @@ public struct PhotoAnalysis: Codable, Sendable, Equatable {
         self.isUtility = isUtility
         self.featurePrint = featurePrint
         self.layoutSignature = layoutSignature
+        self.analysisWarnings = analysisWarnings
+        self.labels = labels
+        self.noiseLevel = noiseLevel
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(pixelWidth: try c.decode(Int.self, forKey: .pixelWidth), pixelHeight: try c.decode(Int.self, forKey: .pixelHeight),
+                  captureDate: try c.decodeIfPresent(Date.self, forKey: .captureDate), sharpness: try c.decode(Float.self, forKey: .sharpness),
+                  subjectSharpness: try c.decode(Float.self, forKey: .subjectSharpness), meanLuminance: try c.decode(Float.self, forKey: .meanLuminance),
+                  highlightClipping: try c.decode(Float.self, forKey: .highlightClipping), shadowClipping: try c.decode(Float.self, forKey: .shadowClipping),
+                  faces: try c.decode([FaceInfo].self, forKey: .faces), aestheticScore: try c.decodeIfPresent(Float.self, forKey: .aestheticScore),
+                  isUtility: try c.decodeIfPresent(Bool.self, forKey: .isUtility), featurePrint: try c.decodeIfPresent(Embedding.self, forKey: .featurePrint),
+                  layoutSignature: try c.decodeIfPresent(Embedding.self, forKey: .layoutSignature),
+                  analysisWarnings: try c.decodeIfPresent([String].self, forKey: .analysisWarnings) ?? [],
+                  labels: try c.decodeIfPresent([String].self, forKey: .labels) ?? [], noiseLevel: try c.decodeIfPresent(Float.self, forKey: .noiseLevel))
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
     }
 
     public var significantFaces: [FaceInfo] { faces.filter(\.isSignificant) }
@@ -140,6 +162,7 @@ public struct PhotoItem: Identifiable, Sendable, Equatable {
     public var isBestInGroup: Bool = false
     public var issues: [Issue] = []
     public var suggestion: Decision = .undecided
+    public var reviewMessages: [String] = []
 
     // The user's choices.
     public var decision: Decision = .undecided
@@ -156,6 +179,13 @@ public struct PhotoItem: Identifiable, Sendable, Equatable {
 
     /// Every file belonging to this shot.
     public var allFiles: [URL] { [url] + companions }
+
+    public var reviewReasons: [String] {
+        if let analysisError { return [analysisError] }
+        guard let analysis else { return ["Analysis pending"] }
+        return analysis.analysisWarnings + reviewMessages
+    }
+    public var needsReview: Bool { analysis == nil || !reviewReasons.isEmpty || suggestion == .undecided }
 
     /// Identifies this exact file version; cached analysis is reused only when it matches.
     public var cacheKey: String { "\(url.path)|\(fileSize)|\(modificationDate.timeIntervalSince1970)" }

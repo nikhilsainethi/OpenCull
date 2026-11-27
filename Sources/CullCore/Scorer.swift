@@ -13,8 +13,23 @@ public struct ScoringOptions: Codable, Sendable, Equatable {
     public var underexposedClipping: Float = 0.40
     /// Suggest rejecting every shot in a group except the best one.
     public var rejectNonBestInGroup: Bool = true
+    public var rejectExposureProblems: Bool = true
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = ScoringOptions()
+        eyesClosedThreshold = try c.decodeIfPresent(Float.self, forKey: .eyesClosedThreshold) ?? d.eyesClosedThreshold
+        blurAbsoluteThreshold = try c.decodeIfPresent(Float.self, forKey: .blurAbsoluteThreshold) ?? d.blurAbsoluteThreshold
+        blurRelativeThreshold = try c.decodeIfPresent(Float.self, forKey: .blurRelativeThreshold) ?? d.blurRelativeThreshold
+        overexposedClipping = try c.decodeIfPresent(Float.self, forKey: .overexposedClipping) ?? d.overexposedClipping
+        overexposedMean = try c.decodeIfPresent(Float.self, forKey: .overexposedMean) ?? d.overexposedMean
+        underexposedMean = try c.decodeIfPresent(Float.self, forKey: .underexposedMean) ?? d.underexposedMean
+        underexposedClipping = try c.decodeIfPresent(Float.self, forKey: .underexposedClipping) ?? d.underexposedClipping
+        rejectNonBestInGroup = try c.decodeIfPresent(Bool.self, forKey: .rejectNonBestInGroup) ?? d.rejectNonBestInGroup
+        rejectExposureProblems = try c.decodeIfPresent(Bool.self, forKey: .rejectExposureProblems) ?? d.rejectExposureProblems
+    }
 }
 
 /// Turns measurements into issues, a 0-100 score, the best shot of each group and a
@@ -51,7 +66,8 @@ public enum Scorer {
         // (0.33 at the blur threshold, approaching 1 for very sharp images).
         let relative = groupMaxSharpness.map { $0 > 0 ? min(1, a.subjectSharpness / $0) : 1 } ?? 1
         let reference = options.blurAbsoluteThreshold * 2
-        let absolute = a.subjectSharpness / (a.subjectSharpness + reference)
+        let denominator = a.subjectSharpness + reference
+        let absolute = denominator > 0 ? a.subjectSharpness / denominator : 0
         let sharpness = 0.5 * relative + 0.5 * absolute
 
         let qualities = a.significantFaces.compactMap(\.captureQuality)
@@ -71,7 +87,9 @@ public enum Scorer {
     /// Groups the items, scores them and fills in `groupID`, `groupSize`, `score`,
     /// `issues`, `isBestInGroup` and `suggestion`. User decisions are not touched.
     public static func evaluate(_ items: inout [PhotoItem], grouping: GroupingOptions = GroupingOptions(),
-                                scoring: ScoringOptions = ScoringOptions()) {
+                                scoring: ScoringOptions = ScoringOptions(), preference: PreferenceProfile? = nil,
+                                groupOverrides: [String: String] = [:]) {
+        for i in items.indices { items[i].reviewMessages = [] }
         let analyzedIndices = items.indices.filter { items[$0].analysis != nil }
         for i in items.indices where items[i].analysis == nil {
             items[i].groupID = nil
@@ -86,7 +104,15 @@ public enum Scorer {
             Grouper.Input(name: items[i].fileName, date: items[i].analysis?.captureDate,
                           embedding: items[i].analysis?.featurePrint, layout: items[i].analysis?.layoutSignature)
         }
-        let groupNumbers = Grouper.group(inputs, options: grouping)
+        var groupNumbers = Grouper.group(inputs, options: grouping)
+        var nextManualGroup = (groupNumbers.max() ?? -1) + 1
+        var manualNumbers: [String: Int] = [:]
+        for (k, i) in analyzedIndices.enumerated() {
+            if let token = groupOverrides[items[i].id] {
+                if manualNumbers[token] == nil { manualNumbers[token] = nextManualGroup; nextManualGroup += 1 }
+                groupNumbers[k] = manualNumbers[token]!
+            }
+        }
         var members: [Int: [Int]] = [:]
         for (k, i) in analyzedIndices.enumerated() {
             members[groupNumbers[k], default: []].append(i)
@@ -102,7 +128,8 @@ public enum Scorer {
                 items[i].groupID = group
                 items[i].groupSize = indices.count
                 items[i].issues = found
-                items[i].score = score(for: analysis, groupMaxSharpness: maxSharpness, issues: found, options: scoring)
+                let base = score(for: analysis, groupMaxSharpness: maxSharpness, issues: found, options: scoring)
+                items[i].score = max(0, min(100, base + (preference?.adjustment(for: analysis) ?? 0)))
                 items[i].isBestInGroup = false
             }
 
@@ -111,15 +138,49 @@ public enum Scorer {
 
             for i in indices {
                 let serious = items[i].issues.contains(.blurry) || items[i].issues.contains(.eyesClosed)
-                if serious {
+                    || (scoring.rejectExposureProblems && (items[i].issues.contains(.overexposed) || items[i].issues.contains(.underexposed)))
+                let warnings = items[i].analysis?.analysisWarnings ?? []
+                if !warnings.isEmpty {
+                    items[i].suggestion = .undecided
+                } else if serious {
                     items[i].suggestion = .reject
                 } else if isGroup && i != best && scoring.rejectNonBestInGroup {
-                    items[i].issues.append(.duplicate)
-                    items[i].suggestion = .reject
+                    let gap = (best.flatMap { items[$0].score } ?? 0) - (items[i].score ?? 0)
+                    if gap < 2 {
+                        items[i].suggestion = .undecided
+                        items[i].reviewMessages = ["Similar alternatives are close in score; compare before choosing."]
+                    } else {
+                        items[i].issues.append(.duplicate)
+                        items[i].suggestion = .reject
+                    }
                 } else {
                     items[i].suggestion = .pick
                 }
             }
         }
+    }
+
+    /// Proposes up to the requested total, retaining all explicit choices and never forcing
+    /// unsafe or incompletely analyzed images into the selection to meet a quota.
+    @discardableResult
+    public static func cullToTarget(_ items: inout [PhotoItem], count: Int) -> Int {
+        let explicitPicks = items.filter { $0.decision == .pick }.count
+        let capacity = max(0, count - explicitPicks)
+        let eligible = items.indices.filter { i in
+            guard let a = items[i].analysis else { return false }
+            return items[i].decision == .undecided && items[i].analysisError == nil && a.analysisWarnings.isEmpty
+                && !items[i].issues.contains(.blurry) && !items[i].issues.contains(.eyesClosed)
+                && !items[i].issues.contains(.overexposed) && !items[i].issues.contains(.underexposed)
+        }.sorted {
+            if items[$0].isBestInGroup != items[$1].isBestInGroup { return items[$0].isBestInGroup }
+            return (items[$0].score ?? 0) > (items[$1].score ?? 0)
+        }
+        let selected = Set(eligible.prefix(capacity))
+        let eligibleSet = Set(eligible)
+        for i in items.indices where items[i].decision == .undecided {
+            if selected.contains(i) { items[i].suggestion = .pick }
+            else if eligibleSet.contains(i) { items[i].suggestion = .reject }
+        }
+        return explicitPicks + selected.count
     }
 }

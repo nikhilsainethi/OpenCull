@@ -25,16 +25,25 @@ do {
 let analyzer = PhotoAnalyzer()
 let start = Date()
 let lock = NSLock()
-DispatchQueue.concurrentPerform(iterations: items.count) { i in
-    let item = items[i]
-    let fallback = item.companions.first { !ImageLoader.isRaw($0) }
-    let result = Result { try analyzer.analyze(url: item.url, fallback: fallback) }
-    lock.lock()
+// Immutable job inputs are separate from the mutable result array. Even disjoint element
+// access can race through Swift Array's storage/exclusivity machinery.
+let jobs = items
+var results: [(Int, Result<PhotoAnalysis, Error>)] = []
+DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+    autoreleasepool {
+        let item = jobs[i]
+        let fallback = item.companions.first { !ImageLoader.isRaw($0) }
+        let result = Result { try analyzer.analyze(url: item.url, fallback: fallback) }
+        lock.lock()
+        results.append((i, result))
+        lock.unlock()
+    }
+}
+for (i, result) in results {
     switch result {
     case .success(let analysis): items[i].analysis = analysis
     case .failure(let error): items[i].analysisError = error.localizedDescription
     }
-    lock.unlock()
 }
 let elapsed = Date().timeIntervalSince(start)
 Scorer.evaluate(&items)
@@ -68,6 +77,9 @@ if json {
         var highlightClipping: Float?
         var captureDate: Date?
         var error: String?
+        var warnings: [String]
+        var labels: [String]
+        var needsReview: Bool
     }
     let rows = items.map { item in
         Row(file: item.fileName, group: item.groupID, groupSize: item.groupSize, best: item.isBestInGroup,
@@ -78,7 +90,7 @@ if json {
             faceQuality: item.analysis?.faces.map(\.captureQuality) ?? [],
             aesthetic: item.analysis?.aestheticScore, meanLuminance: item.analysis?.meanLuminance,
             highlightClipping: item.analysis?.highlightClipping, captureDate: item.analysis?.captureDate,
-            error: item.analysisError)
+            error: item.analysisError, warnings: item.reviewReasons, labels: item.analysis?.labels ?? [], needsReview: item.needsReview)
     }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -110,4 +122,9 @@ if json {
                String(a.faces.count), eyes.isEmpty ? "-" : eyes, format(a.aestheticScore), similarity,
                item.suggestion.rawValue, item.issues.map(\.rawValue).joined(separator: ",")].joined(separator: "\t"))
     }
+}
+let failures = items.filter { $0.analysisError != nil }.count
+if failures > 0 {
+    FileHandle.standardError.write(Data("\(failures) photo(s) could not be analyzed; see per-photo errors.\n".utf8))
+    exit(3)
 }

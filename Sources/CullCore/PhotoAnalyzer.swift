@@ -44,33 +44,43 @@ public struct PhotoAnalyzer: Sendable {
     /// Analyzes an already decoded, upright image.
     public func analyze(image: CGImage, gray providedGray: GrayImage? = nil, metadata: ImageLoader.Metadata? = nil) -> PhotoAnalysis {
         let gray = providedGray ?? GrayImage(cgImage: image) ?? GrayImage(width: 1, height: 1, pixels: [0])
-        let sharpness = gray.tiledSharpness()
+        let sharpness = gray.robustSharpness()
         let exposure = gray.exposure()
+        let noise = gray.estimatedNoise()
+        var warnings: [String] = []
+        if noise > 10 { warnings.append("High image noise or fine texture: inspect focus at 100% before accepting.") }
 
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        let faces = detectFaces(handler: handler, imageSize: CGSize(width: image.width, height: image.height), gray: gray)
+        let faces = detectFaces(handler: handler, imageSize: CGSize(width: image.width, height: image.height), gray: gray, warnings: &warnings)
 
-        // Main subject sharpness: the largest significant face, otherwise the whole frame.
-        let subjectSharpness = faces.filter(\.isSignificant)
-            .max { $0.boundingBox.width < $1.boundingBox.width }?
-            .sharpness ?? sharpness
+        // Keep a soft second significant person from being hidden by a sharper larger face.
+        let subjectSharpness = faces.filter(\.isSignificant).compactMap(\.sharpness).min() ?? sharpness
 
         var aesthetic: Float?
         var utility: Bool?
         if #available(macOS 15.0, *) {
             let request = VNCalculateImageAestheticsScoresRequest()
-            if (try? handler.perform([request])) != nil, let result = request.results?.first {
-                aesthetic = result.overallScore
-                utility = result.isUtility
-            }
+            do {
+                try handler.perform([request])
+                if let result = request.results?.first { aesthetic = result.overallScore; utility = result.isUtility }
+                else { warnings.append("Aesthetics analysis returned no result.") }
+            } catch { warnings.append("Aesthetics analysis unavailable: \(error.localizedDescription)") }
         }
 
         var embedding: Embedding?
         let printRequest = VNGenerateImageFeaturePrintRequest()
         printRequest.imageCropAndScaleOption = .scaleFill
-        if (try? handler.perform([printRequest])) != nil, let result = printRequest.results?.first {
-            embedding = Self.embedding(from: result)
-        }
+        do {
+            try handler.perform([printRequest])
+            if let result = printRequest.results?.first { embedding = Self.embedding(from: result) }
+            if embedding == nil { warnings.append("Similarity analysis returned no usable feature print.") }
+        } catch { warnings.append("Similarity analysis unavailable: \(error.localizedDescription)") }
+        let classify = VNClassifyImageRequest()
+        var labels: [String] = []
+        do {
+            try handler.perform([classify])
+            labels = (classify.results ?? []).filter { $0.confidence >= 0.12 }.prefix(12).map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
+        } catch { warnings.append("Search labels unavailable: \(error.localizedDescription)") }
 
         return PhotoAnalysis(
             pixelWidth: metadata?.pixelWidth ?? image.width,
@@ -85,21 +95,24 @@ public struct PhotoAnalyzer: Sendable {
             aestheticScore: aesthetic,
             isUtility: utility,
             featurePrint: embedding,
-            layoutSignature: gray.layoutSignature()
+            layoutSignature: gray.layoutSignature(), analysisWarnings: warnings, labels: labels, noiseLevel: noise
         )
     }
 
     // MARK: - Faces
 
-    private func detectFaces(handler: VNImageRequestHandler, imageSize: CGSize, gray: GrayImage) -> [FaceInfo] {
+    private func detectFaces(handler: VNImageRequestHandler, imageSize: CGSize, gray: GrayImage, warnings: inout [String]) -> [FaceInfo] {
         let landmarksRequest = VNDetectFaceLandmarksRequest()
-        guard (try? handler.perform([landmarksRequest])) != nil,
-              let observations = landmarksRequest.results, !observations.isEmpty else { return [] }
+        do { try handler.perform([landmarksRequest]) }
+        catch { warnings.append("Face analysis unavailable: \(error.localizedDescription)"); return [] }
+        guard let observations = landmarksRequest.results, !observations.isEmpty else { return [] }
 
         let qualityRequest = VNDetectFaceCaptureQualityRequest()
         qualityRequest.inputFaceObservations = observations
-        try? handler.perform([qualityRequest])
+        do { try handler.perform([qualityRequest]) }
+        catch { warnings.append("Face quality unavailable: \(error.localizedDescription)") }
         let qualityResults = qualityRequest.results ?? []
+        let smooth = gray.denoised()
 
         return observations.map { face in
             let box = face.boundingBox // normalized, origin bottom-left
@@ -121,7 +134,7 @@ public struct PhotoAnalyzer: Sendable {
                 default: openness = nil
                 }
             }
-            let sharpness = gray.laplacianVariance(normalizedRect: topLeftBox, padding: 0.05)
+            let sharpness = smooth.laplacianVariance(normalizedRect: topLeftBox, padding: 0.05).map { $0 * 4 }
             return FaceInfo(boundingBox: topLeftBox, captureQuality: quality, eyeOpenness: openness, sharpness: sharpness)
         }
     }
