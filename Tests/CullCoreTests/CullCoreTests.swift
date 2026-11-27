@@ -306,7 +306,9 @@ final class XMPTests: XCTestCase {
         let updated = try XCTUnwrap(XMPSidecar.update(existing: lightroom, with: .init(rating: 5, label: "Green")))
         XCTAssertTrue(updated.contains("xmp:Rating=\"5\""))
         XCTAssertFalse(updated.contains("xmp:Rating=\"2\""))
-        XCTAssertTrue(updated.contains("xmp:Label=\"Green\""))
+        let resultXML = try XMLDocument(xmlString: updated)
+        let resultDescription = try XCTUnwrap(try resultXML.nodes(forXPath: "//*[local-name()='Description']").first as? XMLElement)
+        XCTAssertEqual(resultDescription.attribute(forLocalName: "Label", uri: "http://ns.adobe.com/xap/1.0/")?.stringValue, "Green")
         XCTAssertTrue(updated.contains("crs:Exposure2012=\"+0.50\""))
         XCTAssertNoThrow(try XMLDocument(xmlString: updated))
     }
@@ -332,11 +334,13 @@ final class XMPTests: XCTestCase {
         XCTAssertEqual(description.attribute(forLocalName: "Label", uri: "http://ns.adobe.com/xap/1.0/")?.stringValue, "Red")
     }
 
-    func testOtherPrefixForXapNamespaceIsLeftAlone() {
+    func testOtherPrefixForXapNamespaceIsUpdatedSafely() throws {
         let other = """
         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:xap="http://ns.adobe.com/xap/1.0/" xap:Rating="2"/></rdf:RDF>
         """
-        XCTAssertNil(XMPSidecar.update(existing: other, with: .init(rating: 3, label: nil)))
+        let result = try XCTUnwrap(XMPSidecar.update(existing: other, with: .init(rating: 3, label: nil)))
+        XCTAssertTrue(result.contains("xap:Rating=\"3\""))
+        XCTAssertNoThrow(try XMLDocument(xmlString: result))
     }
 
     func testWriteCreatesUpdatesAndBacksUp() throws {
@@ -351,8 +355,9 @@ final class XMPTests: XCTestCase {
         XCTAssertEqual(try XMPSidecar.write(photo: photo, decision: .pick, rating: 3), .created)
         XCTAssertEqual(try XMPSidecar.write(photo: photo, decision: .reject, rating: 3), .updated)
         XCTAssertTrue(try String(contentsOf: sidecar, encoding: .utf8).contains("xmp:Rating=\"-1\""))
-        // Our own file: no backup needed.
-        XCTAssertFalse(FileManager.default.fileExists(atPath: sidecar.path + ".opencull-backup"))
+        // Every existing sidecar gets a recoverable original, including our own.
+        let firstBackup = try String(contentsOf: URL(fileURLWithPath: sidecar.path + ".opencull-backup"), encoding: .utf8)
+        XCTAssertTrue(firstBackup.contains("xmp:Rating=\"3\""))
 
         // A sidecar from another app is backed up before editing.
         let foreign = """
@@ -361,7 +366,7 @@ final class XMPTests: XCTestCase {
         """
         try foreign.write(to: sidecar, atomically: true, encoding: .utf8)
         XCTAssertEqual(try XMPSidecar.write(photo: photo, decision: .pick, rating: 5), .updated)
-        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: sidecar.path + ".opencull-backup"), encoding: .utf8), foreign)
+        XCTAssertEqual(try String(contentsOf: URL(fileURLWithPath: sidecar.path + ".opencull-backup"), encoding: .utf8), firstBackup)
         XCTAssertTrue(try String(contentsOf: sidecar, encoding: .utf8).contains("xmp:Rating=\"5\""))
     }
 }
