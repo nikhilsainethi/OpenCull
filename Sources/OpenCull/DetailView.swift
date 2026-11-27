@@ -9,12 +9,8 @@ struct DetailView: View {
             VStack(spacing: 0) {
                 ZStack {
                     Color.black
-                    // Small preview appears instantly; the large one replaces it when decoded.
-                    PhotoImageView(item: item, size: 360)
-                    PhotoImageView(item: item, size: 2400, showsPlaceholder: false)
-                    if model.showFaceBoxes, let analysis = item.analysis {
-                        FaceBoxesOverlay(analysis: analysis, threshold: model.scoring.eyesClosedThreshold)
-                    }
+                    ZoomablePhotoView(item: item, recipe: model.showOriginal ? .identity : model.recipe(for: item),
+                                      zoom: model.zoom, showFaceBoxes: model.showFaceBoxes, keyFace: model.keyFace(for: item))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
@@ -93,6 +89,21 @@ private struct InfoPanel: View {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             } else if let analysis = item.analysis {
                 metrics(analysis)
+                if !item.reviewReasons.isEmpty {
+                    Label(item.reviewReasons.joined(separator: " · "), systemImage: "questionmark.circle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if analysis.faces.count > 1 {
+                    HStack {
+                        Text("Focus subject").foregroundStyle(.secondary)
+                        Menu {
+                            Button("Automatic (all significant faces)") { model.setKeyFace(nil) }
+                            ForEach(analysis.faces.indices, id: \.self) { index in
+                                Button("Face \(index + 1)") { model.setKeyFace(index) }
+                            }
+                        } label: { Text(model.keyFace(for: item).map { "Face \($0 + 1)" } ?? "Automatic") }
+                    }
+                }
             } else {
                 HStack { ProgressView().controlSize(.small); Text("Analyzing…").foregroundStyle(.secondary) }
             }

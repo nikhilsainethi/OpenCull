@@ -14,6 +14,7 @@ struct EditorPanel: View {
     @State private var colorExpanded = true
     @State private var detailExpanded = false
     @State private var cropExpanded = false
+    @State private var aspectRequest = UUID()
 
     private var histogramRecipe: EditRecipe { model.showOriginal ? .identity : model.selectedRecipe }
     private var renderKey: String { model.selectedItem.map { PreviewCache.versionKey(for: $0, size: 1000, recipe: histogramRecipe) } ?? "none" }
@@ -266,12 +267,16 @@ struct EditorPanel: View {
     }
     private func cropToAspect(_ ratio: Double) {
         guard let item = model.selectedItem else { return }
-        var base = model.selectedRecipe; base.crop = nil
+        let original = model.selectedRecipe, revision = model.editRevision, request = UUID()
+        aspectRequest = request
+        var base = original; base.crop = nil
+        let sourceKey = PreviewCache.versionKey(for: item, size: 1600, recipe: base)
         Task {
             let result = await PreviewCache.shared.result(for: item, size: 1600, recipe: base)
-            guard model.selectedID == item.id, case .image(let image) = result else { return }
-            var current = model.selectedRecipe; current.crop = nil
-            guard current == base else { return }
+            guard aspectRequest == request, model.editRevision == revision, model.selectedID == item.id,
+                  model.selectedRecipe == original,
+                  PreviewCache.versionKey(for: item, size: 1600, recipe: base) == sourceKey,
+                  case .image(let image) = result else { return }
             let aspect = Double(image.width) / Double(image.height)
             let width = min(1, ratio / aspect), height = min(1, aspect / ratio)
             var recipe = model.selectedRecipe

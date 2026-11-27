@@ -14,6 +14,13 @@ struct SettingsView: View {
                               format: { String(format: "%.2f", $0) })
                 LabeledSlider(title: "Similarity without timestamps", value: floatBinding($model.grouping.minSimilarityWithoutTime),
                               range: 0.5...0.99, step: 0.01, format: { String(format: "%.2f", $0) })
+                Toggle("Rescue blurred burst frames using layout", isOn: $model.grouping.allowLayoutFallback)
+                LabeledSlider(title: "Layout similarity required", value: floatBinding($model.grouping.minLayoutSimilarity), range: 0.8...0.999, step: 0.005,
+                              format: { String(format: "%.3f", $0) })
+                LabeledSlider(title: "Layout without timestamps", value: floatBinding($model.grouping.minLayoutSimilarityWithoutTime), range: 0.8...0.999, step: 0.005,
+                              format: { String(format: "%.3f", $0) })
+                LabeledSlider(title: "Semantic floor for layout rescue", value: floatBinding($model.grouping.minimumSemanticForLayout), range: 0.3...0.95, step: 0.01,
+                              format: { String(format: "%.2f", $0) })
             }
             Section("Problem detection") {
                 LabeledSlider(title: "Eyes closed below", value: floatBinding($model.scoring.eyesClosedThreshold), range: 0.05...0.3, step: 0.01,
@@ -23,9 +30,27 @@ struct SettingsView: View {
                 LabeledSlider(title: "Blurry below (% of group's sharpest)", value: floatBinding($model.scoring.blurRelativeThreshold),
                               range: 0.1...0.9, step: 0.05, format: { String(format: "%.0f%%", $0 * 100) })
                 Toggle("Suggest rejecting all but the best shot of each group", isOn: $model.scoring.rejectNonBestInGroup)
+                Toggle("Suggest rejecting exposure problems", isOn: $model.scoring.rejectExposureProblems)
+                LabeledSlider(title: "Overexposed: white clipping", value: floatBinding($model.scoring.overexposedClipping), range: 0.01...0.8, step: 0.01,
+                              format: { String(format: "%.0f%%", $0 * 100) })
+                LabeledSlider(title: "Overexposed: mean brightness", value: floatBinding($model.scoring.overexposedMean), range: 0.5...0.99, step: 0.01,
+                              format: { String(format: "%.0f%%", $0 * 100) })
+                LabeledSlider(title: "Underexposed: mean brightness", value: floatBinding($model.scoring.underexposedMean), range: 0.01...0.4, step: 0.01,
+                              format: { String(format: "%.0f%%", $0 * 100) })
+                LabeledSlider(title: "Underexposed: black clipping", value: floatBinding($model.scoring.underexposedClipping), range: 0.05...0.95, step: 0.01,
+                              format: { String(format: "%.0f%%", $0 * 100) })
             }
             Section("Culling") {
                 Toggle("Move to the next photo after Pick or Reject", isOn: $model.autoAdvance)
+                Toggle("Include subfolders when opening an album", isOn: $model.recursive)
+            }
+            Section("Personal ranking") {
+                Toggle("Adapt ranking from my explicit choices", isOn: $model.usePreferences)
+                Text("\(model.preference.sampleCount) local examples. \(model.preference.isReady ? "Personal ranking is ready." : "More picks and rejects are needed before rankings change.")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("This small local preference model adjusts ranking, while technical checks and your choices stay in control.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Reset learned preferences", role: .destructive) { model.resetPreference() }
             }
             HStack {
                 Spacer()
@@ -33,8 +58,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 520)
-        .fixedSize(horizontal: false, vertical: true)
+        .frame(width: 620, height: 760)
     }
 
     private func floatBinding(_ binding: Binding<Float>) -> Binding<Double> {

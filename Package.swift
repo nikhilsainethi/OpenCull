@@ -17,5 +17,6 @@ let package = Package(
         // Command-line tool: analyze a folder and print the results.
         .executableTarget(name: "OpenCullCLI", dependencies: ["CullCore"]),
         .testTarget(name: "CullCoreTests", dependencies: ["CullCore"]),
+        .testTarget(name: "OpenCullTests", dependencies: ["OpenCull", "CullCore"]),
     ]
 )
