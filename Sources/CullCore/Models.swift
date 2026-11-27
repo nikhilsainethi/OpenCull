@@ -1,0 +1,162 @@
+import CoreGraphics
+import Foundation
+
+/// The culling decision for a photo, either suggested by the analyzer or made by the user.
+public enum Decision: String, Codable, Sendable, CaseIterable {
+    case undecided
+    case pick
+    case reject
+}
+
+/// A problem detected in a photo.
+public enum Issue: String, Codable, Sendable, CaseIterable, Comparable {
+    case blurry
+    case eyesClosed
+    case overexposed
+    case underexposed
+    case duplicate
+
+    public var label: String {
+        switch self {
+        case .blurry: return "Out of focus / blurry"
+        case .eyesClosed: return "Eyes closed"
+        case .overexposed: return "Overexposed"
+        case .underexposed: return "Underexposed"
+        case .duplicate: return "Weaker shot in a similar group"
+        }
+    }
+
+    public var symbolName: String {
+        switch self {
+        case .blurry: return "scope"
+        case .eyesClosed: return "eye.slash"
+        case .overexposed: return "sun.max.fill"
+        case .underexposed: return "moon.fill"
+        case .duplicate: return "square.on.square"
+        }
+    }
+
+    public static func < (lhs: Issue, rhs: Issue) -> Bool {
+        allCases.firstIndex(of: lhs)! < allCases.firstIndex(of: rhs)!
+    }
+}
+
+/// Facts about one detected face.
+public struct FaceInfo: Codable, Sendable, Equatable {
+    /// Normalized bounding box (0...1), origin at the TOP-left of the image.
+    public var boundingBox: CGRect
+    /// Apple Vision face capture quality (0...1). Only meaningful when compared between
+    /// shots of the same person.
+    public var captureQuality: Float?
+    /// Eye openness ratio (eye height / eye width) of the more open eye, or nil when
+    /// eye landmarks were not found.
+    public var eyeOpenness: Float?
+    /// Laplacian sharpness measured inside the face box.
+    public var sharpness: Float?
+
+    public init(boundingBox: CGRect, captureQuality: Float? = nil, eyeOpenness: Float? = nil, sharpness: Float? = nil) {
+        self.boundingBox = boundingBox
+        self.captureQuality = captureQuality
+        self.eyeOpenness = eyeOpenness
+        self.sharpness = sharpness
+    }
+
+    /// Faces smaller than this (as a fraction of image width) are too small for reliable
+    /// eye and sharpness measurements, so they are ignored for those checks.
+    public static let minimumSignificantWidth: CGFloat = 0.05
+
+    public var isSignificant: Bool { boundingBox.width >= Self.minimumSignificantWidth }
+}
+
+/// Everything measured about one photo. Expensive to compute, so it is cached.
+public struct PhotoAnalysis: Codable, Sendable, Equatable {
+    /// Bump this when the analysis changes so old cached results are recomputed.
+    public static let currentVersion = 2
+
+    public var version: Int = PhotoAnalysis.currentVersion
+    public var pixelWidth: Int
+    public var pixelHeight: Int
+    public var captureDate: Date?
+    /// Sharpness of the sharpest parts of the frame (mean Laplacian variance of the top tiles).
+    public var sharpness: Float
+    /// Sharpness of the main subject: the largest significant face if any, otherwise `sharpness`.
+    public var subjectSharpness: Float
+    /// Mean luminance, 0...1.
+    public var meanLuminance: Float
+    /// Fraction of pixels that are nearly pure white.
+    public var highlightClipping: Float
+    /// Fraction of pixels that are nearly pure black.
+    public var shadowClipping: Float
+    public var faces: [FaceInfo]
+    /// Apple Vision aesthetics score (-1...1). macOS 15 or later only.
+    public var aestheticScore: Float?
+    /// Apple Vision's "utility image" flag (screenshots, documents, receipts). macOS 15+ only.
+    public var isUtility: Bool?
+    /// L2-normalized image embedding used to find similar shots.
+    public var featurePrint: Embedding?
+    /// Low-resolution brightness layout, robust to blur. Used together with `featurePrint`.
+    public var layoutSignature: Embedding?
+
+    public init(pixelWidth: Int, pixelHeight: Int, captureDate: Date?, sharpness: Float, subjectSharpness: Float,
+                meanLuminance: Float, highlightClipping: Float, shadowClipping: Float, faces: [FaceInfo],
+                aestheticScore: Float? = nil, isUtility: Bool? = nil, featurePrint: Embedding? = nil,
+                layoutSignature: Embedding? = nil) {
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.captureDate = captureDate
+        self.sharpness = sharpness
+        self.subjectSharpness = subjectSharpness
+        self.meanLuminance = meanLuminance
+        self.highlightClipping = highlightClipping
+        self.shadowClipping = shadowClipping
+        self.faces = faces
+        self.aestheticScore = aestheticScore
+        self.isUtility = isUtility
+        self.featurePrint = featurePrint
+        self.layoutSignature = layoutSignature
+    }
+
+    public var significantFaces: [FaceInfo] { faces.filter(\.isSignificant) }
+}
+
+/// One photo in the library. A RAW+JPEG pair with the same name is treated as one photo.
+public struct PhotoItem: Identifiable, Sendable, Equatable {
+    /// Absolute path of the primary file.
+    public var id: String { url.path }
+    /// Primary file (the RAW when a RAW+JPEG pair exists).
+    public let url: URL
+    /// Other files that belong to the same shot (e.g. the JPEG of a RAW+JPEG pair).
+    public let companions: [URL]
+    public let fileSize: Int64
+    public let modificationDate: Date
+
+    public var analysis: PhotoAnalysis?
+    public var analysisError: String?
+
+    // Results of grouping and scoring.
+    public var groupID: Int?
+    public var groupSize: Int = 1
+    public var score: Float?
+    public var isBestInGroup: Bool = false
+    public var issues: [Issue] = []
+    public var suggestion: Decision = .undecided
+
+    // The user's choices.
+    public var decision: Decision = .undecided
+    public var rating: Int = 0
+
+    public init(url: URL, companions: [URL] = [], fileSize: Int64 = 0, modificationDate: Date = Date(timeIntervalSince1970: 0)) {
+        self.url = url
+        self.companions = companions
+        self.fileSize = fileSize
+        self.modificationDate = modificationDate
+    }
+
+    public var fileName: String { url.lastPathComponent }
+
+    /// Every file belonging to this shot.
+    public var allFiles: [URL] { [url] + companions }
+
+    /// Identifies this exact file version; cached analysis is reused only when it matches.
+    public var cacheKey: String { "\(url.path)|\(fileSize)|\(modificationDate.timeIntervalSince1970)" }
+}
