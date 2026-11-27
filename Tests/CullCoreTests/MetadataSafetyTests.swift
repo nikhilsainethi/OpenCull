@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import XCTest
 @testable import CullCore
 
@@ -230,7 +232,15 @@ final class MetadataSafetyTests: XCTestCase {
 
     func testSameStemIndependentExportsCannotShareMetadata() throws {
         let dir = try directory(), a = dir.appendingPathComponent("A.jpg"), b = dir.appendingPathComponent("A.png")
-        try Data([1]).write(to: a); try Data([2]).write(to: b)
+        let context = try XCTUnwrap(CGContext(data: nil, width: 16, height: 16, bitsPerComponent: 8, bytesPerRow: 64,
+                                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(red: 0.5, green: 0.4, blue: 0.3, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 16, height: 16))
+        for (url, type) in [(a, "public.jpeg"), (b, "public.png")] {
+            let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(url as CFURL, type as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, try XCTUnwrap(context.makeImage()), nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+        }
         var first = PhotoItem(url: a), second = PhotoItem(url: b)
         first.decision = .pick; first.rating = 5
         second.decision = .pick; second.rating = 1

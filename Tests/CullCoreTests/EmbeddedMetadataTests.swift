@@ -108,4 +108,23 @@ final class EmbeddedMetadataTests: XCTestCase {
         XCTAssertThrowsError(try XMPSidecar.writeEmbedded(photo: link, decision: .pick, rating: 5))
         XCTAssertEqual(try Data(contentsOf: target), original)
     }
+
+    func testCopyPicksEmbedsCurrentChoicesInStandardCopiesOnly() throws {
+        for (type, ext) in [("public.jpeg", "jpg"), ("public.png", "png"), ("public.tiff", "tif")] {
+            let photo = try fixture(type: type, ext: ext)
+            let originalBytes = try Data(contentsOf: photo), originalPixels = try pixels(photo)
+            var item = PhotoItem(url: photo); item.decision = .pick; item.rating = 5
+            let destination = photo.deletingLastPathComponent().appendingPathComponent("Export")
+            let copied = Exporter.copy([item], to: destination)
+            XCTAssertEqual(copied.copiedPhotos, 1, ext)
+            XCTAssertTrue(copied.failures.isEmpty, copied.failures.joined(separator: "; "))
+            let output = destination.appendingPathComponent(photo.lastPathComponent)
+            let exported = try metadata(output)
+            XCTAssertEqual(value("xmp:Rating", in: exported), "5", ext)
+            XCTAssertEqual(value("xmp:Label", in: exported), "Green", ext)
+            XCTAssertEqual(value("xmp:CreatorTool", in: exported), "Metadata Test", ext)
+            XCTAssertEqual(try Data(contentsOf: photo), originalBytes, ext)
+            XCTAssertEqual(try pixels(output), originalPixels, ext)
+        }
+    }
 }

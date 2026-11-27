@@ -7,6 +7,7 @@ public enum Exporter {
         public var copiedPhotos = 0
         public var skippedExisting = 0
         public var failures: [String] = []
+        public var warnings: [String] = []
     }
 
     private enum CopyError: Error, LocalizedError {
@@ -60,7 +61,20 @@ public enum Exporter {
                     } else { sidecarText = existing }
                 } else if let values { sidecarText = XMPSidecar.makeDocument(values) }
                 try fm.createDirectory(at: staging, withIntermediateDirectories: false)
-                for source in sources { try fm.copyItem(at: source, to: staging.appendingPathComponent(source.lastPathComponent)) }
+                var bundleWarnings: [String] = []
+                for source in sources {
+                    let staged = staging.appendingPathComponent(source.lastPathComponent)
+                    try fm.copyItem(at: source, to: staged)
+                    if values != nil, !ImageLoader.isRaw(source) {
+                        if ["jpg", "jpeg", "png", "tif", "tiff"].contains(source.pathExtension.lowercased()) {
+                            // Standard-file editors read embedded choices, not companion XMP.
+                            // Only the staged copy is modified; the source stays byte-identical.
+                            try XMPSidecar.writeEmbedded(photo: staged, decision: item.decision, rating: item.rating)
+                        } else {
+                            bundleWarnings.append("\(source.lastPathComponent): current ratings are in XMP only. For embedded metadata handoff, export a rendered JPEG/PNG/TIFF copy.")
+                        }
+                    }
+                }
                 if let sidecarText { try sidecarText.write(to: staging.appendingPathComponent(sidecar.lastPathComponent), atomically: true, encoding: .utf8) }
                 // Exclusive moves fail instead of overwriting a concurrent destination creation.
                 for name in names {
@@ -69,6 +83,7 @@ public enum Exporter {
                     published.append((target, fileIdentity(target)))
                 }
                 result.copiedPhotos += 1
+                result.warnings.append(contentsOf: bundleWarnings)
             } catch {
                 for file in published where fileIdentity(file.url) == file.identity { try? fm.removeItem(at: file.url) }
                 result.failures.append("\(item.fileName): \(error.localizedDescription)")
