@@ -1,3 +1,4 @@
+import AppKit
 import CullCore
 import SwiftUI
 
@@ -12,9 +13,18 @@ struct GridView: View {
                     ForEach(model.sections) { section in
                         Section {
                             ForEach(section.items) { item in
-                                PhotoCell(item: item, isSelected: item.id == model.selectedID)
+                                PhotoCell(item: item, isSelected: model.selection.contains(item.id) || item.id == model.selectedID)
                                     .id(item.id)
-                                    .onTapGesture { model.selectedID = item.id }
+                                    .onTapGesture { model.select(item.id, extending: !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty) }
+                                    .contextMenu {
+                                        Button("Edit photo") { model.select(item.id); model.mode = .edit }
+                                        Button("Compare this group") { model.select(item.id); model.mode = .compare; model.prepareComparison() }
+                                        Divider()
+                                        Button("Pick") { model.select(item.id); model.setDecision(.pick) }
+                                        Button("Reject") { model.select(item.id); model.setDecision(.reject) }
+                                    }
+                                    .accessibilityElement(children: .combine)
+                                    .accessibilityLabel(item.fileName)
                             }
                         } header: {
                             if let title = section.title {
@@ -26,7 +36,6 @@ struct GridView: View {
                 .padding(12)
                 // Photos move between groups when results arrive; rebuilding the grid then
                 // guarantees every cell shows the latest analysis.
-                .id(model.layoutVersion)
             }
             .onChange(of: model.selectedID) { _, id in
                 guard let id else { return }
@@ -58,12 +67,13 @@ private struct SectionHeader: View {
 }
 
 struct PhotoCell: View {
+    @Environment(LibraryModel.self) private var model
     let item: PhotoItem
     let isSelected: Bool
 
     var body: some View {
         VStack(spacing: 6) {
-            PhotoImageView(item: item, size: 360)
+            PhotoImageView(item: item, size: 360, recipe: model.recipe(for: item))
                 .frame(height: 130)
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -93,6 +103,9 @@ struct PhotoCell: View {
                 }
                 if item.analysisError != nil {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).help(item.analysisError ?? "")
+                }
+                if item.needsReview {
+                    Image(systemName: "questionmark.circle").foregroundStyle(.yellow).help(item.reviewReasons.joined(separator: "\n"))
                 }
                 ForEach(item.issues.filter { $0 != .duplicate }, id: \.self) { issue in
                     Image(systemName: issue.symbolName)

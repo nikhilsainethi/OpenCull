@@ -88,11 +88,61 @@ public struct GrayImage: Sendable {
         return values.prefix(count).reduce(0, +) / Float(count)
     }
 
+    /// Low-pass denoising keeps sensor noise from being mistaken for focused subject detail.
+    public func denoised() -> GrayImage {
+        guard width > 2, height > 2 else { return self }
+        var output = pixels
+        for y in 1..<(height - 1) {
+            for x in 1..<(width - 1) {
+                let i = y * width + x
+                let sum = Int(pixels[i-width-1]) + 2*Int(pixels[i-width]) + Int(pixels[i-width+1])
+                    + 2*Int(pixels[i-1]) + 4*Int(pixels[i]) + 2*Int(pixels[i+1])
+                    + Int(pixels[i+width-1]) + 2*Int(pixels[i+width]) + Int(pixels[i+width+1])
+                output[i] = UInt8(sum / 16)
+            }
+        }
+        return GrayImage(width: width, height: height, pixels: output)
+    }
+
+    /// Median high-frequency residual, reported as a diagnostic rather than a quality judgment.
+    public func estimatedNoise() -> Float {
+        guard width > 2, height > 2 else { return 0 }
+        var residuals: [Int] = []
+        let stride = max(1, min(width, height) / 300)
+        for y in Swift.stride(from: 1, to: height - 1, by: stride) {
+            for x in Swift.stride(from: 1, to: width - 1, by: stride) {
+                let i = y * width + x
+                residuals.append(abs(4*Int(pixels[i]) - Int(pixels[i-1]) - Int(pixels[i+1]) - Int(pixels[i-width]) - Int(pixels[i+width])))
+            }
+        }
+        residuals.sort()
+        return Float(residuals[residuals.count / 2]) / 3.016
+    }
+
+    /// Uses denoised detail spread over at least 20% of tiles. A tiny checker/logo patch
+    /// cannot make an otherwise featureless frame look focused. Raw tiledSharpness remains
+    /// available for diagnostics; recommendation thresholds use this robust measurement.
+    public func robustSharpness() -> Float {
+        let smooth = denoised()
+        let tile = max(24, min(width, height) / 12)
+        var values: [Float] = []
+        for y in Swift.stride(from: 0, through: max(0, height - tile), by: tile) {
+            for x in Swift.stride(from: 0, through: max(0, width - tile), by: tile) {
+                values.append(smooth.laplacianVariance(x0: x, y0: y, x1: min(width, x+tile), y1: min(height, y+tile)))
+            }
+        }
+        guard !values.isEmpty else { return 0 }
+        values.sort(by: >)
+        // The weakest tile among the strongest fifth enforces real spatial support.
+        let index = min(values.count-1, max(0, values.count / 5))
+        return values[index] * 4
+    }
+
     /// A tiny (16x16) mean-centred brightness layout of the frame. Two frames of the same
     /// burst have nearly identical layouts even when one of them is blurred, which is
     /// where neural embeddings become unreliable.
     public func layoutSignature(gridSize: Int = 16) -> Embedding? {
-        guard width >= gridSize, height >= gridSize else { return nil }
+        guard gridSize > 0, width >= gridSize, height >= gridSize else { return nil }
         var cells = [Float](repeating: 0, count: gridSize * gridSize)
         pixels.withUnsafeBufferPointer { p in
             for gy in 0..<gridSize {
@@ -124,7 +174,7 @@ public struct GrayImage: Sendable {
         pixels.withUnsafeBufferPointer { p in
             for v in p { histogram[Int(v)] += 1 }
         }
-        let total = Float(pixels.count)
+        let total = Float(max(1, pixels.count))
         var weighted = 0
         for (value, count) in histogram.enumerated() { weighted += value * count }
         let highlights = histogram[250...].reduce(0, +)

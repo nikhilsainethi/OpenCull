@@ -6,12 +6,32 @@ import Foundation
 //   opencull-cli <folder> [--recursive] [--json]
 
 let arguments = Array(CommandLine.arguments.dropFirst())
-guard let folderArgument = arguments.first(where: { !$0.hasPrefix("--") }) else {
-    FileHandle.standardError.write(Data("usage: opencull-cli <folder> [--recursive] [--json]\n".utf8))
-    exit(2)
+let usage = "usage: opencull-cli <folder> [--recursive] [--json] [--intent general|posedPortrait|groupPortrait|candid|creative]\n"
+var recursive = false, json = false
+var folderArgument: String?
+var intent = ShootingIntent.general
+var index = 0
+while index < arguments.count {
+    let argument = arguments[index]
+    switch argument {
+    case "--recursive": recursive = true
+    case "--json": json = true
+    case "--intent":
+        index += 1
+        guard index < arguments.count, let value = ShootingIntent(rawValue: arguments[index]) else {
+            FileHandle.standardError.write(Data(usage.utf8)); exit(2)
+        }
+        intent = value
+    case "--help", "-h": print(usage, terminator: ""); exit(0)
+    default:
+        guard !argument.hasPrefix("-"), folderArgument == nil else {
+            FileHandle.standardError.write(Data(usage.utf8)); exit(2)
+        }
+        folderArgument = argument
+    }
+    index += 1
 }
-let recursive = arguments.contains("--recursive")
-let json = arguments.contains("--json")
+guard let folderArgument else { FileHandle.standardError.write(Data(usage.utf8)); exit(2) }
 let folder = URL(fileURLWithPath: (folderArgument as NSString).expandingTildeInPath)
 
 var items: [PhotoItem]
@@ -25,19 +45,38 @@ do {
 let analyzer = PhotoAnalyzer()
 let start = Date()
 let lock = NSLock()
-DispatchQueue.concurrentPerform(iterations: items.count) { i in
-    let item = items[i]
-    let fallback = item.companions.first { !ImageLoader.isRaw($0) }
-    let result = Result { try analyzer.analyze(url: item.url, fallback: fallback) }
-    lock.lock()
+// Immutable job inputs are separate from the mutable result array. Even disjoint element
+// access can race through Swift Array's storage/exclusivity machinery.
+let jobs = items
+var results: [(Int, Result<PhotoAnalysis, Error>)] = []
+DispatchQueue.concurrentPerform(iterations: jobs.count) { i in
+    autoreleasepool {
+        let item = jobs[i]
+        let fallback = item.companions.first { !ImageLoader.isRaw($0) }
+        let result = Result { try analyzer.analyze(url: item.url, fallback: fallback) }
+        lock.lock()
+        results.append((i, result))
+        lock.unlock()
+    }
+}
+let manifest = try? PhotoImportManifest.read(from: folder)
+let albumComponents = folder.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+let metadataByRelative = Dictionary((manifest?.items ?? []).map { ($0.relativePath, $0) }, uniquingKeysWith: { first, _ in first })
+for (i, result) in results {
     switch result {
-    case .success(let analysis): items[i].analysis = analysis
+    case .success(var analysis):
+        if analysis.captureDate == nil {
+            let components = items[i].url.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+            let relative = components.starts(with: albumComponents) ? components.dropFirst(albumComponents.count).joined(separator: "/") : ""
+            analysis.captureDate = metadataByRelative[relative]?.captureDateOverride
+        }
+        items[i].analysis = analysis
     case .failure(let error): items[i].analysisError = error.localizedDescription
     }
-    lock.unlock()
 }
 let elapsed = Date().timeIntervalSince(start)
-Scorer.evaluate(&items)
+var options = ScoringOptions(); options.shootingIntent = intent
+Scorer.evaluate(&items, scoring: options)
 
 func format(_ value: Float?, _ digits: Int = 2) -> String {
     guard let value else { return "-" }
@@ -61,6 +100,10 @@ if json {
         var sharpness: Float?
         var subjectSharpness: Float?
         var faces: Int
+        var shootingIntent: String
+        var eyeStates: [String]
+        var cameraAttention: [String]
+        var people: [String]
         var eyeOpenness: [Float?]
         var faceQuality: [Float?]
         var aesthetic: Float?
@@ -68,17 +111,24 @@ if json {
         var highlightClipping: Float?
         var captureDate: Date?
         var error: String?
+        var warnings: [String]
+        var labels: [String]
+        var needsReview: Bool
     }
     let rows = items.map { item in
         Row(file: item.fileName, group: item.groupID, groupSize: item.groupSize, best: item.isBestInGroup,
             score: item.score, suggestion: item.suggestion.rawValue, issues: item.issues.map(\.rawValue),
             sharpness: item.analysis?.sharpness, subjectSharpness: item.analysis?.subjectSharpness,
             faces: item.analysis?.faces.count ?? 0,
+            shootingIntent: intent.rawValue,
+            eyeStates: item.analysis?.faces.map { PeopleAssessment.assess($0, intent: intent).eyeState.rawValue } ?? [],
+            cameraAttention: item.analysis?.faces.map { PeopleAssessment.assess($0, intent: intent).cameraAttention.rawValue } ?? [],
+            people: item.analysis?.faces.map { PeopleAssessment.assess($0, intent: intent).summary } ?? [],
             eyeOpenness: item.analysis?.faces.map(\.eyeOpenness) ?? [],
             faceQuality: item.analysis?.faces.map(\.captureQuality) ?? [],
             aesthetic: item.analysis?.aestheticScore, meanLuminance: item.analysis?.meanLuminance,
             highlightClipping: item.analysis?.highlightClipping, captureDate: item.analysis?.captureDate,
-            error: item.analysisError)
+            error: item.analysisError, warnings: item.reviewReasons, labels: item.analysis?.labels ?? [], needsReview: item.needsReview)
     }
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -110,4 +160,9 @@ if json {
                String(a.faces.count), eyes.isEmpty ? "-" : eyes, format(a.aestheticScore), similarity,
                item.suggestion.rawValue, item.issues.map(\.rawValue).joined(separator: ",")].joined(separator: "\t"))
     }
+}
+let failures = items.filter { $0.analysisError != nil }.count
+if failures > 0 {
+    FileHandle.standardError.write(Data("\(failures) photo(s) could not be analyzed; see per-photo errors.\n".utf8))
+    exit(3)
 }

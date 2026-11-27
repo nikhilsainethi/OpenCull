@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
 
@@ -16,14 +17,31 @@ public enum ImageLoader {
     public static func isRaw(_ url: URL) -> Bool { rawExtensions.contains(url.pathExtension.lowercased()) }
     public static func isSupported(_ url: URL) -> Bool { supportedExtensions.contains(url.pathExtension.lowercased()) }
 
+    /// A non-nil CIRAWFilter may only wrap an embedded ordinary image. In that case
+    /// Apple's decoder list contains `None`, which is not sensor-data RAW support.
+    public static func supportsFullRawDecoding(url: URL) -> Bool {
+        guard isRaw(url), let filter = CIRAWFilter(imageURL: url) else { return false }
+        return hasFullRawDecoder(filter)
+    }
+
+    static func hasFullRawDecoder(_ filter: CIRAWFilter) -> Bool {
+        filter.supportedDecoderVersions.contains { $0 != .none && !$0.rawValue.isEmpty }
+    }
+
     /// Decodes an upright (orientation applied) image whose longest side is at most `maxPixelSize`.
     public static func loadImage(url: URL, maxPixelSize: Int) -> CGImage? {
+        guard maxPixelSize > 0, maxPixelSize <= 100_000 else { return nil }
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
             return nil
         }
         let index = CGImageSourceGetPrimaryImageIndex(source)
 
         if isRaw(url) {
+            if !supportsFullRawDecoding(url: url) {
+                // Preview-only access is useful for review, but callers must not infer
+                // native resolution from ImageIO's thumbnail-sized properties.
+                return thumbnail(source: source, index: index, maxPixelSize: maxPixelSize, forceDecode: false)
+            }
             // 1. Try the embedded preview (fast).
             if let preview = thumbnail(source: source, index: index, maxPixelSize: maxPixelSize, forceDecode: false) {
                 let longSide = max(preview.width, preview.height)
@@ -69,7 +87,9 @@ public enum ImageLoader {
         public var captureDate: Date?
     }
 
-    /// Reads dimensions and capture time (including sub-second time, which matters for bursts).
+    /// Reads container dimensions and capture time. On unsupported RAW containers these
+    /// dimensions can describe only a preview; consult supportsFullRawDecoding before
+    /// presenting them as native sensor-resolution dimensions.
     public static func metadata(url: URL) -> Metadata? {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let props = CGImageSourceCopyPropertiesAtIndex(source, CGImageSourceGetPrimaryImageIndex(source), nil) as? [CFString: Any]
@@ -121,7 +141,7 @@ public enum ImageLoader {
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\0")))
         guard t.count == 6, let sign = t.first, sign == "+" || sign == "-" else { return nil }
         let parts = t.dropFirst().split(separator: ":")
-        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+        guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]), (0...23).contains(h), (0...59).contains(m) else { return nil }
         return (sign == "-" ? -1 : 1) * (h * 3600 + m * 60)
     }
 }

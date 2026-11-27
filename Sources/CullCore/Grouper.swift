@@ -10,6 +10,9 @@ public struct GroupingOptions: Codable, Sendable, Equatable {
     /// Stricter thresholds used when capture times are missing.
     public var minSimilarityWithoutTime: Float = 0.90
     public var minLayoutSimilarityWithoutTime: Float = 0.95
+    /// Layout may rescue moderate embedding drift, never contradictory semantic evidence.
+    public var allowLayoutFallback: Bool = true
+    public var minimumSemanticForLayout: Float = 0.55
 
     public init() {}
 
@@ -23,6 +26,8 @@ public struct GroupingOptions: Codable, Sendable, Equatable {
         minSimilarityWithoutTime = try c.decodeIfPresent(Float.self, forKey: .minSimilarityWithoutTime) ?? defaults.minSimilarityWithoutTime
         minLayoutSimilarityWithoutTime = try c.decodeIfPresent(Float.self, forKey: .minLayoutSimilarityWithoutTime)
             ?? defaults.minLayoutSimilarityWithoutTime
+        allowLayoutFallback = try c.decodeIfPresent(Bool.self, forKey: .allowLayoutFallback) ?? defaults.allowLayoutFallback
+        minimumSemanticForLayout = try c.decodeIfPresent(Float.self, forKey: .minimumSemanticForLayout) ?? defaults.minimumSemanticForLayout
     }
 }
 
@@ -59,23 +64,29 @@ public enum Grouper {
 
         var groups = [Int](repeating: 0, count: inputs.count)
         var current = 0
+        var representative = order[0]
         groups[order[0]] = current
         for k in 1..<order.count {
             let previous = inputs[order[k - 1]], item = inputs[order[k]]
-            if !belongTogether(previous, item, options: options) { current += 1 }
+            if !belongTogether(previous, item, options: options)
+                || !belongTogether(inputs[representative], item, options: options, checkTime: false) {
+                current += 1
+                representative = order[k]
+            }
             groups[order[k]] = current
         }
         return groups
     }
 
-    static func belongTogether(_ a: Input, _ b: Input, options: GroupingOptions) -> Bool {
+    static func belongTogether(_ a: Input, _ b: Input, options: GroupingOptions, checkTime: Bool = true) -> Bool {
         let semantic = similarity(a.embedding, b.embedding)
         let layout = similarity(a.layout, b.layout)
+        let layoutAllowed = options.allowLayoutFallback && (semantic ?? -1) >= options.minimumSemanticForLayout
         if let da = a.date, let db = b.date {
-            guard abs(db.timeIntervalSince(da)) <= options.maxTimeGap else { return false }
-            return (semantic ?? -1) >= options.minSimilarity || (layout ?? -1) >= options.minLayoutSimilarity
+            if checkTime && abs(db.timeIntervalSince(da)) > options.maxTimeGap { return false }
+            return (semantic ?? -1) >= options.minSimilarity || (layoutAllowed && (layout ?? -1) >= options.minLayoutSimilarity)
         }
-        return (semantic ?? -1) >= options.minSimilarityWithoutTime || (layout ?? -1) >= options.minLayoutSimilarityWithoutTime
+        return (semantic ?? -1) >= options.minSimilarityWithoutTime || (layoutAllowed && (layout ?? -1) >= options.minLayoutSimilarityWithoutTime)
     }
 
     private static func similarity(_ a: Embedding?, _ b: Embedding?) -> Float? {

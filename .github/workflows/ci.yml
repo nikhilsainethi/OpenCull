@@ -5,12 +5,39 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   build-and-test:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          swift --version
       - name: Build
         run: swift build
       - name: Test
-        run: swift test
+        run: python3 scripts/test-with-diagnostics.py
+      - name: Retain test hang diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCull-test-diagnostics
+          path: ci-diagnostics/
+          if-no-files-found: ignore
+      - name: Universal release smoke test
+        run: ./scripts/build-app.sh
+      - name: Verify copied release archive
+        run: ./scripts/verify-release.sh
+      - name: Retain verified build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCull-0.3.0-macOS
+          path: |
+            dist/OpenCull-0.3.0-macOS.zip
+            dist/opencull-cli
+            dist/release-verification.txt

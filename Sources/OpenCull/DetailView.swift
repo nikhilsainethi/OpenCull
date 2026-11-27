@@ -9,12 +9,8 @@ struct DetailView: View {
             VStack(spacing: 0) {
                 ZStack {
                     Color.black
-                    // Small preview appears instantly; the large one replaces it when decoded.
-                    PhotoImageView(item: item, size: 360)
-                    PhotoImageView(item: item, size: 2400, showsPlaceholder: false)
-                    if model.showFaceBoxes, let analysis = item.analysis {
-                        FaceBoxesOverlay(analysis: analysis, threshold: model.scoring.eyesClosedThreshold)
-                    }
+                    ZoomablePhotoView(item: item, recipe: model.showOriginal ? .identity : model.recipe(for: item),
+                                      zoom: model.zoom, showFaceBoxes: model.showFaceBoxes, keyFace: model.keyFace(for: item))
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
@@ -27,40 +23,6 @@ struct DetailView: View {
         } else {
             ContentUnavailableView("No photo selected", systemImage: "photo")
         }
-    }
-}
-
-/// Draws detected faces: green when eyes are open, red when closed, grey when unknown or too small.
-private struct FaceBoxesOverlay: View {
-    let analysis: PhotoAnalysis
-    let threshold: Float
-
-    var body: some View {
-        GeometryReader { geometry in
-            let aspect = CGFloat(max(1, analysis.pixelWidth)) / CGFloat(max(1, analysis.pixelHeight))
-            let container = geometry.size
-            let fitted: CGSize = container.width / container.height > aspect
-                ? CGSize(width: container.height * aspect, height: container.height)
-                : CGSize(width: container.width, height: container.width / aspect)
-            let origin = CGPoint(x: (container.width - fitted.width) / 2, y: (container.height - fitted.height) / 2)
-
-            ForEach(Array(analysis.faces.enumerated()), id: \.offset) { _, face in
-                let rect = CGRect(x: origin.x + face.boundingBox.minX * fitted.width,
-                                  y: origin.y + face.boundingBox.minY * fitted.height,
-                                  width: face.boundingBox.width * fitted.width,
-                                  height: face.boundingBox.height * fitted.height)
-                Rectangle()
-                    .stroke(color(for: face), lineWidth: 2)
-                    .frame(width: rect.width, height: rect.height)
-                    .position(x: rect.midX, y: rect.midY)
-            }
-        }
-        .allowsHitTesting(false)
-    }
-
-    private func color(for face: FaceInfo) -> Color {
-        guard face.isSignificant, let openness = face.eyeOpenness else { return .gray }
-        return openness < threshold ? .red : .green
     }
 }
 
@@ -83,6 +45,10 @@ private struct InfoPanel: View {
                 decisionButtons
             }
 
+            if let source = model.provenance(for: item) {
+                Text("\(source.source.title) · \(source.originalFileName)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                if let quality = source.representationQuality { Text(quality).font(.caption2).foregroundStyle(.secondary) }
+            }
             HStack {
                 ratingControl
                 Spacer()
@@ -93,6 +59,35 @@ private struct InfoPanel: View {
                 Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
             } else if let analysis = item.analysis {
                 metrics(analysis)
+                if !item.reviewReasons.isEmpty {
+                    Label(item.reviewReasons.joined(separator: " · "), systemImage: "questionmark.circle")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if !analysis.faces.isEmpty {
+                    DisclosureGroup("People · \(analysis.faces.count) detected") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(analysis.faces.enumerated()), id: \.offset) { index, face in
+                                let assessment = PeopleAssessment.assess(face, intent: model.scoring.shootingIntent,
+                                    eyesClosedThreshold: model.scoring.eyesClosedThreshold)
+                                Text("Face \(index + 1): \(assessment.summary)")
+                                    .font(.caption).textSelection(.enabled)
+                                Text(assessment.eyeConfidenceDescription + " · " + assessment.attentionConfidenceDescription)
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                if analysis.faces.count > 1 {
+                    HStack {
+                        Text("Focus subject").foregroundStyle(.secondary)
+                        Menu {
+                            Button("Automatic (all significant faces)") { model.setKeyFace(nil) }
+                            ForEach(analysis.faces.indices, id: \.self) { index in
+                                Button("Face \(index + 1)") { model.setKeyFace(index) }
+                            }
+                        } label: { Text(model.keyFace(for: item).map { "Face \($0 + 1)" } ?? "Automatic") }
+                    }
+                }
             } else {
                 HStack { ProgressView().controlSize(.small); Text("Analyzing…").foregroundStyle(.secondary) }
             }
@@ -202,10 +197,9 @@ private struct InfoPanel: View {
     }
 
     private func eyesText(_ a: PhotoAnalysis) -> String {
-        let values = a.significantFaces.compactMap(\.eyeOpenness)
-        guard !values.isEmpty else { return "–" }
-        let closed = values.filter { $0 < model.scoring.eyesClosedThreshold }.count
-        let list = values.map { String(format: "%.2f", $0) }.joined(separator: ", ")
-        return closed == 0 ? "open (\(list))" : "\(closed) closed (\(list))"
+        let faces = a.significantFaces
+        guard !faces.isEmpty else { return a.faces.isEmpty ? "no faces" : "faces too small" }
+        let assessments = PeopleAssessment.assessments(for: a, options: model.scoring)
+        return assessments.map(\.eyeDescription).joined(separator: "; ")
     }
 }
