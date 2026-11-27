@@ -510,7 +510,10 @@ final class LibraryModel {
                 func enqueue() {
                     guard next < jobs.count, !Task.isCancelled else { return }
                     let job = jobs[next]; next += 1
-                    group.addTask(priority: .utility) { (job, Result { try analyze(job.url, job.fallback) }) }
+                    group.addTask(priority: .utility) {
+                        let result = await PhotoAnalysisWorker.shared.run { try analyze(job.url, job.fallback) }
+                        return (job, result)
+                    }
                 }
                 for _ in 0..<concurrency { enqueue() }
                 for await (job, result) in group {
