@@ -1,4 +1,4 @@
-# OpenCull 0.2
+# OpenCull 0.3
 
 **Native photo culling, comparison and nondestructive editing for macOS.** Open a
 shoot, review technical suggestions, compare frames at full resolution, develop
@@ -23,7 +23,7 @@ imitation of a proprietary editing or culling model.
 - **Build:** Xcode 16+ or equivalent Command Line Tools with a macOS 15+ SDK.
   A newer SDK can build the macOS 14 deployment target.
 
-When an asset is published, download `OpenCull-0.2.0-macOS.zip` from
+When an asset is published, download `OpenCull-0.3.0-macOS.zip` from
 [Releases](https://github.com/nikhilsainethi/OpenCull/releases), unzip it and move
 it to Applications yourself. Builds are ad-hoc signed, **not notarized**. macOS
 may require Control-click → Open or Privacy & Security → Open Anyway.
@@ -41,21 +41,44 @@ Packaging creates a universal app, CLI and app ZIP in `dist/`, after staging and
 verification in a fresh system temporary directory. It never installs an app or
 publishes a release. Previous generated outputs are preserved in `dist/.previous/`;
 unrelated `dist/` files are untouched. To change the numeric version, use
-`VERSION=0.2.1 ./scripts/build-app.sh` and `VERSION=0.2.1 ./scripts/verify-release.sh`.
+`VERSION=0.3.1 ./scripts/build-app.sh` and `VERSION=0.3.1 ./scripts/verify-release.sh`.
 For development, use `swift run OpenCull` or open `Package.swift` in Xcode.
 
 ## Import an album
 
-Use **Open Folder…** (⌘O), drop a folder on the window, or reopen a recent album
-from **Albums**. Enable **Include subfolders** before opening to scan a folder
-tree. A single matching RAW/JPEG pair is combined when unambiguous; independent
-same-stem formats remain separately reviewable.
+Use **Open Folder…** (⌘O) to work in place, or reopen a recent album from
+**Albums**. Enable **Include subfolders** to scan a folder tree. A single matching
+RAW/JPEG pair is combined when unambiguous; independent same-stem formats remain
+separately reviewable.
 
-**Photos** opens Apple's picker. Selected representations are copied into a local
-OpenCull album without changing the Photos library. The system may need to
-retrieve selected iCloud items before import. Analysis runs in the background;
-decode errors and partial Vision results are visible. Album actions includes
-**Retry failed analysis**.
+**Import** copies files, multiple folders or ZIP archives into a managed local
+album. Drag local files/folders/ZIPs onto the window; native file promises from
+Photos are supported when the source supplies them. Original filenames, folder
+relationships and RAW/JPEG/XMP companions are retained. ZIP expansion is bounded
+and rejects unsafe paths, links, encryption, malformed archives and unsupported
+ZIP64. The default import limits are 20,000 entries, 2 GiB expanded in total and
+512 MiB per file; split larger exports into smaller albums. Imports stage and publish a complete new album; cancelling or failing an
+import preserves the current album. Source information is stored locally beside
+the imported copies and displayed in the inspector.
+
+**Apple Photos** uses the system picker with the current representation requested.
+Only chosen items are copied; available asset identifiers are retained locally.
+The supplied representation can be rendered or converted, so original/RAW quality
+is explicitly unverified. iCloud items may need internet before import. This is
+not a Photos library browser and does not write decisions back to Photos.
+
+**Google Photos** opens the official website in your browser. Select photos there,
+use **Download**, then **Import downloads…**; larger libraries can use **Import
+Takeout…** for ZIPs or extracted folders. Takeout JSON capture times supply missing
+EXIF capture dates without modifying photo bytes. This handoff stores no Google
+sign-in, uses no Google service API and does not scrape private web endpoints.
+Website links, `blob:` URLs and browser thumbnails are not original photo files;
+download the desired files first. There is no continuous Google library sync or
+cloud-library writeback. Downloading needs internet; culling and editing run on
+your Mac after files arrive.
+
+Analysis runs in the background; decode errors and partial Vision results are
+visible. Album actions includes **Retry failed analysis**.
 
 ## Cull and compare
 
@@ -80,6 +103,25 @@ and leaves uncertain photos undecided; the complete operation is undoable.
   of the same-looking image are not byte-exact duplicates.
 - Set a target count, choose **Suggest target selection**, review and accept.
   Existing manual choices are retained.
+
+### People and photographic intent
+
+Choose **Shooting intent** in the album bar or Settings. General photography is
+the default. Posed portrait and posed group modes require review when camera
+attention is uncertain; candid/documentary treats looking away as neutral.
+Creative mode treats soft focus as potentially intentional and requests review
+instead of automatically rejecting blur.
+
+Eye checks keep separate left/right landmark measurements. Clear supported
+both-eye closure can flag a blink; a possible wink or one-eye closure stays for
+review. Profiles, occlusion, low landmark support and small faces produce unknown
+states. Head pose is shown separately from a conservative pupil-position estimate
+of camera attention: head direction alone is not gaze. The **People** disclosure
+explains each detected face. These local geometric heuristics are not calibrated
+gaze tracking, biometric identification or a trained blink model. Uncertain frames
+cannot become automatic group winners or target-count picks. Face-region focus
+protects supported portraits from background bokeh, but the app does not have
+universal subject segmentation or a proven intentional-blur classifier.
 
 ### Keyboard
 
@@ -256,3 +298,10 @@ xcrun stapler staple dist/OpenCull.app
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+The CLI accepts `--intent general|posedPortrait|groupPortrait|candid|creative` and
+includes eye/attention descriptions and review reasons in `--json` output. Compare
+intent modes on the same folder to inspect policy differences; photographic
+accuracy still needs a consented, labeled sample set of real shoots.
+
+Source workflow references: [Google Photos downloads](https://support.google.com/photos/answer/7652919?co=GENIE.Platform%3DDesktop&hl=en), [Google Takeout](https://support.google.com/photos/answer/3024190?hl=en), and [Apple PhotosPicker](https://developer.apple.com/documentation/photosui/photospicker).

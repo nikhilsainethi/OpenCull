@@ -1,9 +1,11 @@
 import Foundation
 
 public struct ScoringOptions: Codable, Sendable, Equatable {
-    /// A face whose more-open eye is below this openness ratio counts as "eyes closed".
+    public var shootingIntent: ShootingIntent = .general
+    /// Eye openness threshold; new per-eye evidence also needs reliable support,
+    /// frontal pose and a small uncertainty margin before a closed-eye rejection.
     public var eyesClosedThreshold: Float = 0.16
-    /// Subject sharpness below this is always "blurry".
+    /// Subject sharpness below this is "blurry" (reviewed under creative intent).
     public var blurAbsoluteThreshold: Float = 60
     /// Within a group, a shot below this fraction of the sharpest shot is "blurry".
     public var blurRelativeThreshold: Float = 0.45
@@ -20,6 +22,7 @@ public struct ScoringOptions: Codable, Sendable, Equatable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = ScoringOptions()
+        shootingIntent = try c.decodeIfPresent(ShootingIntent.self, forKey: .shootingIntent) ?? d.shootingIntent
         eyesClosedThreshold = try c.decodeIfPresent(Float.self, forKey: .eyesClosedThreshold) ?? d.eyesClosedThreshold
         blurAbsoluteThreshold = try c.decodeIfPresent(Float.self, forKey: .blurAbsoluteThreshold) ?? d.blurAbsoluteThreshold
         blurRelativeThreshold = try c.decodeIfPresent(Float.self, forKey: .blurRelativeThreshold) ?? d.blurRelativeThreshold
@@ -36,8 +39,22 @@ public struct ScoringOptions: Codable, Sendable, Equatable {
 /// suggested decision. All rules are simple, documented heuristics.
 public enum Scorer {
     private static func technicallyRejected(_ issues: [Issue], options: ScoringOptions) -> Bool {
-        issues.contains(.blurry) || issues.contains(.eyesClosed)
+        (issues.contains(.blurry) && options.shootingIntent != .creative) || issues.contains(.eyesClosed)
             || (options.rejectExposureProblems && (issues.contains(.overexposed) || issues.contains(.underexposed)))
+    }
+
+    private static func measurementReviewMessages(_ a: PhotoAnalysis) -> [String] {
+        let focusValid = a.sharpness.isFinite && a.sharpness >= 0 && a.subjectSharpness.isFinite && a.subjectSharpness >= 0
+        let exposureValid = [a.meanLuminance, a.highlightClipping, a.shadowClipping].allSatisfy { $0.isFinite && (0...1).contains($0) }
+        return focusValid && exposureValid ? [] : ["Technical measurements are invalid or incomplete; inspect before accepting."]
+    }
+
+    private static func contextReviewMessages(_ a: PhotoAnalysis, issues: [Issue], options: ScoringOptions) -> [String] {
+        var messages = measurementReviewMessages(a) + PeopleAssessment.reviewMessages(for: a, options: options)
+        if options.shootingIntent == .creative && issues.contains(.blurry) {
+            messages.append("Soft focus may be intentional for creative photography; review instead of automatically rejecting.")
+        }
+        return messages
     }
 
     public static func issues(for a: PhotoAnalysis, groupMaxSharpness: Float?, options: ScoringOptions) -> [Issue] {
@@ -59,26 +76,26 @@ public enum Scorer {
     }
 
     public static func hasClosedEyes(_ a: PhotoAnalysis, options: ScoringOptions) -> Bool {
-        a.significantFaces.contains { face in
-            guard let openness = face.eyeOpenness else { return false }
-            return openness < options.eyesClosedThreshold
-        }
+        PeopleAssessment.assessments(for: a, options: options).contains { $0.eyeState == .closed }
     }
 
     /// Quality score from 0 to 100. Only comparisons inside a group are really meaningful.
     public static func score(for a: PhotoAnalysis, groupMaxSharpness: Float?, issues: [Issue], options: ScoringOptions) -> Float {
+        // Invalid evidence is separately routed to review; keep every public score finite.
+        guard a.subjectSharpness.isFinite, a.subjectSharpness >= 0,
+              [a.highlightClipping, a.shadowClipping].allSatisfy({ $0.isFinite && (0...1).contains($0) }) else { return 0 }
         // Sharpness: half relative to the group's sharpest shot, half on an absolute curve
         // (0.33 at the blur threshold, approaching 1 for very sharp images).
-        let relative = groupMaxSharpness.map { $0 > 0 ? min(1, a.subjectSharpness / $0) : 1 } ?? 1
-        let reference = options.blurAbsoluteThreshold * 2
+        let relative = groupMaxSharpness.map { $0.isFinite && $0 > 0 ? min(1, a.subjectSharpness / $0) : 1 } ?? 1
+        let reference = options.blurAbsoluteThreshold.isFinite && options.blurAbsoluteThreshold >= 0 ? options.blurAbsoluteThreshold * 2 : 120
         let denominator = a.subjectSharpness + reference
         let absolute = denominator > 0 ? a.subjectSharpness / denominator : 0
         let sharpness = 0.5 * relative + 0.5 * absolute
 
-        let qualities = a.significantFaces.compactMap(\.captureQuality)
+        let qualities = a.significantFaces.compactMap(\.captureQuality).filter { $0.isFinite && (0...1).contains($0) }
         let faceQuality = qualities.isEmpty ? 0.5 : qualities.reduce(0, +) / Float(qualities.count)
 
-        let aesthetic = a.aestheticScore.map { ($0 + 1) / 2 } ?? 0.5
+        let aesthetic = a.aestheticScore.flatMap { $0.isFinite && (-1...1).contains($0) ? ($0 + 1) / 2 : nil } ?? 0.5
 
         let exposurePenalty = max(0, a.highlightClipping - 0.02) * 2 + max(0, a.shadowClipping - 0.10)
         let exposure = max(0, 1 - exposurePenalty)
@@ -128,7 +145,10 @@ public enum Scorer {
             // Incomplete/noisy measurements may be displayed for review, but must not
             // become the reference that labels another, reliable frame as weak or blurry.
             let reliable = indices.filter {
-                items[$0].analysisError == nil && items[$0].analysis?.analysisWarnings.isEmpty == true
+                guard let a = items[$0].analysis else { return false }
+                let absoluteIssues = issues(for: a, groupMaxSharpness: nil, options: scoring)
+                return items[$0].analysisError == nil && a.analysisWarnings.isEmpty
+                    && contextReviewMessages(a, issues: absoluteIssues, options: scoring).isEmpty
             }
             // A closed-eye/exposure failure is not a usable alternative either. Apply
             // absolute checks before deriving relative focus, avoiding a circular test.
@@ -144,19 +164,20 @@ public enum Scorer {
                 items[i].groupID = group
                 items[i].groupSize = indices.count
                 items[i].issues = found
+                items[i].reviewMessages = contextReviewMessages(analysis, issues: found, options: scoring)
                 let base = score(for: analysis, groupMaxSharpness: maxSharpness, issues: found, options: scoring)
                 items[i].score = max(0, min(100, base + (preference?.adjustment(for: analysis) ?? 0)))
                 items[i].isBestInGroup = false
             }
 
-            let usable = reliable.filter { !technicallyRejected(items[$0].issues, options: scoring) }
+            let usable = reliable.filter { items[$0].reviewMessages.isEmpty && !technicallyRejected(items[$0].issues, options: scoring) }
             let best = usable.max { (items[$0].score ?? 0) < (items[$1].score ?? 0) }
             if let best, isGroup { items[best].isBestInGroup = true }
 
             for i in indices {
                 let serious = technicallyRejected(items[i].issues, options: scoring)
                 let warnings = items[i].analysis?.analysisWarnings ?? []
-                if !warnings.isEmpty || items[i].analysisError != nil {
+                if !warnings.isEmpty || !items[i].reviewMessages.isEmpty || items[i].analysisError != nil {
                     items[i].suggestion = .undecided
                 } else if serious {
                     items[i].suggestion = .reject
@@ -164,7 +185,7 @@ public enum Scorer {
                     let gap = (best.flatMap { items[$0].score } ?? 0) - (items[i].score ?? 0)
                     if gap < 2 {
                         items[i].suggestion = .undecided
-                        items[i].reviewMessages = ["Similar alternatives are close in score; compare before choosing."]
+                        items[i].reviewMessages.append("Similar alternatives are close in score; compare before choosing.")
                     } else {
                         items[i].issues.append(.duplicate)
                         items[i].suggestion = .reject

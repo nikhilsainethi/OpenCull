@@ -51,6 +51,8 @@ private struct LoadedAlbum: @unchecked Sendable {
     let savedDecisions: [String: SessionStore.Entry]
     let savedRecords: [String: PhotoWorkspaceRecord]
     let messages: [String]
+    let importManifest: PhotoImportManifest?
+    let provenanceByID: [String: PhotoImportManifest.Item]
 }
 
 typealias DestinationPanelPresenter = @MainActor (String, @escaping @MainActor (URL?) -> Void) -> (@MainActor () -> Void)
@@ -78,6 +80,9 @@ final class LibraryModel {
     private(set) var isChoosingDestination = false
     private(set) var exportProgress = ""
     private(set) var isFindingDuplicates = false
+    private(set) var importManifest: PhotoImportManifest?
+    private(set) var importProgress = ""
+    private(set) var importCancellationID = UUID()
     private(set) var isImporting = false
     private(set) var isOpening = false
     private(set) var layoutVersion = 0
@@ -108,6 +113,15 @@ final class LibraryModel {
     @ObservationIgnored private var retainedRecords: [String: PhotoWorkspaceRecord] = [:]
     private(set) var records: [String: PhotoWorkspaceRecord] = [:]
     @ObservationIgnored private var examples: [String: PreferenceExample] = [:]
+    @ObservationIgnored private var importTask: Task<PhotoImportResult, Error>?
+    @ObservationIgnored private var importRequest = UUID()
+    @ObservationIgnored private var dropReceiptID: UUID?
+    @ObservationIgnored private var sourcePanel: NSOpenPanel?
+    @ObservationIgnored private var sourcePanelRequest = UUID()
+    @ObservationIgnored private var ownedPhotosScratch: Set<URL> = []
+    @ObservationIgnored private var photosStaging: URL?
+    @ObservationIgnored private var provenanceByID: [String: PhotoImportManifest.Item] = [:]
+    @ObservationIgnored private var captureDateOverrides: [String: Date] = [:]
     @ObservationIgnored private var analysisTask: Task<Void, Never>?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
@@ -135,6 +149,11 @@ final class LibraryModel {
         let root = appDataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("OpenCull", isDirectory: true)
         io = WorkspaceIO(root: root)
+        Task.detached(priority: .utility) {
+            ImportScratchRecovery.recover(in: root.appendingPathComponent("Imports"), prefixes: [".opencull-import-"])
+            ImportScratchRecovery.recover(in: root.appendingPathComponent("Staging"), prefixes: ["Photos-"])
+            ImportScratchRecovery.recover(in: FileManager.default.temporaryDirectory, prefixes: ["OpenCull-Drop-"])
+        }
         grouping = defaults.data(forKey: "grouping").flatMap { try? JSONDecoder().decode(GroupingOptions.self, from: $0) } ?? GroupingOptions()
         scoring = defaults.data(forKey: "scoring").flatMap { try? JSONDecoder().decode(ScoringOptions.self, from: $0) } ?? ScoringOptions()
         autoAdvance = defaults.object(forKey: "autoAdvance") as? Bool ?? true
@@ -217,6 +236,83 @@ final class LibraryModel {
         if mode == .compare { capComparisonSelection() }
     }
 
+    var canImport: Bool { !isChoosingDestination && !isExporting && !isImporting && !isOpening }
+
+    func provenance(for item: PhotoItem) -> PhotoImportManifest.Item? { provenanceByID[item.id] }
+
+    func showImportPanel(source: ImportSourceKind = .files) {
+        guard canImport else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.allowsMultipleSelection = true
+        panel.prompt = "Import copies"
+        panel.message = source == .googlePhotos || source == .takeout
+            ? "Choose downloaded photos, a Google Takeout ZIP, or an extracted folder. Photos are copied into a local OpenCull album."
+            : "Choose photos, folders, or ZIP archives. Originals stay untouched."
+        let request = UUID()
+        sourcePanelRequest = request; sourcePanel = panel; isChoosingDestination = true
+        panel.begin { [weak self] response in
+            Task { @MainActor in
+                guard let self, self.sourcePanelRequest == request else { return }
+                self.sourcePanel = nil; self.isChoosingDestination = false
+                guard response == .OK else { return }
+                await self.importFiles(panel.urls, source: source)
+            }
+        }
+    }
+
+    func importFiles(_ urls: [URL], source: ImportSourceKind,
+                     metadataByPath: [String: PhotoImportMetadata] = [:]) async {
+        guard canImport, !urls.isEmpty, flushPendingSaves() else { return }
+        let request = UUID()
+        importRequest = request; isImporting = true; importProgress = "Copying and checking local photos…"
+        let destination = io.root.appendingPathComponent("Imports/\(source.rawValue)-\(UUID().uuidString)")
+        let reportProgress: @Sendable (PhotoImportProgress) -> Void = { [weak self] progress in
+            guard progress.completed % 20 == 0 || progress.completed == progress.total else { return }
+            Task { @MainActor in
+                guard let self, self.importRequest == request, self.isImporting else { return }
+                self.importProgress = "Importing \(progress.completed) / \(progress.total) · \(progress.currentFileName)"
+            }
+        }
+        let task = Task.detached(priority: .userInitiated) {
+            try PhotoImporter.importFiles(urls, to: destination, source: source, metadataByPath: metadataByPath, progress: reportProgress)
+        }
+        importTask = task
+        defer { if importRequest == request { isImporting = false; importTask = nil; importProgress = "" } }
+        do {
+            let result = try await task.value
+            guard importRequest == request, !Task.isCancelled else {
+                await Self.removeImportScratch(result.albumURL); return
+            }
+            isImporting = false; importTask = nil
+            recursive = true // Managed imports retain folder/RAW companion relationships.
+            await open(result.albumURL)
+            if importRequest == request, folder == result.albumURL, !result.warnings.isEmpty {
+                let additional = result.warnings.count > 30 ? "\n… and \(result.warnings.count - 30) further notes." : ""
+                alert = AlertMessage(title: "Import completed with notes", message: result.warnings.prefix(30).joined(separator: "\n") + additional)
+            }
+        } catch {
+            guard importRequest == request, !Task.isCancelled, !(error is CancellationError) else { return }
+            alert = AlertMessage(title: "Could not import photos", message: error.localizedDescription)
+        }
+    }
+
+    func beginDropReceipt(_ id: UUID) -> Bool {
+        guard canImport else { return false }
+        dropReceiptID = id; isImporting = true; importProgress = "Receiving dropped photos from the source app…"
+        return true
+    }
+    @discardableResult func finishDropReceipt(_ id: UUID) -> Bool {
+        guard dropReceiptID == id else { return false }
+        dropReceiptID = nil; isImporting = false; importProgress = ""
+        return true
+    }
+
+    func cancelImport() {
+        importCancellationID = UUID(); dropReceiptID = nil
+        importRequest = UUID(); importTask?.cancel(); importTask = nil
+        photosStaging = nil; isImporting = false; importProgress = ""
+    }
+
     // MARK: Import and analysis
     func showOpenPanel() {
         guard !isChoosingDestination, !isExporting, !isImporting, !isOpening else { return }
@@ -268,6 +364,8 @@ final class LibraryModel {
         generation = UUID()
         isAnalyzing = false
         folder = url; store = loaded.store; items = loaded.items
+        importManifest = loaded.importManifest; provenanceByID = loaded.provenanceByID
+        captureDateOverrides = loaded.provenanceByID.compactMapValues(\.captureDateOverride)
         records = loaded.records; fingerprints = loaded.fingerprints; analysisCache = loaded.analysisCache
         retainedDecisions = loaded.savedDecisions; retainedRecords = loaded.savedRecords
         editRevision &+= 1
@@ -286,6 +384,13 @@ final class LibraryModel {
         openingRequest = UUID(); openingTask?.cancel(); openingTask = nil; isOpening = false
     }
 
+    private nonisolated static func importRelativePath(_ file: URL, album: URL) -> String {
+        let base = album.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        let path = file.resolvingSymlinksInPath().standardizedFileURL.pathComponents
+        guard path.starts(with: base) else { return "" }
+        return path.dropFirst(base.count).joined(separator: "/")
+    }
+
     private nonisolated static func loadAlbum(_ url: URL, recursive: Bool, sessions: URL,
         scan: @Sendable (URL, Bool) throws -> [PhotoItem]) throws -> LoadedAlbum {
         try Task.checkCancellation()
@@ -295,6 +400,9 @@ final class LibraryModel {
         var decisions: [String: SessionStore.Entry] = [:]
         var workspace = WorkspaceDocument()
         var messages: [String] = []
+        var manifest: PhotoImportManifest?
+        do { manifest = try PhotoImportManifest.read(from: url) }
+        catch { messages.append("Import source information could not be read: " + error.localizedDescription) }
         var cache: [String: PhotoAnalysis] = [:]
         do { decisions = try newStore.readDecisions() }
         catch let error as SessionStore.ReadError where error.recoveryCopy == nil { throw error }
@@ -319,6 +427,8 @@ final class LibraryModel {
             fingerprints[item.id] = newStore.fingerprint(for: item)
         }
         var records: [String: PhotoWorkspaceRecord] = [:]
+        let metadataByRelative = Dictionary((manifest?.items ?? []).map { ($0.relativePath, $0) }, uniquingKeysWith: { first, _ in first })
+        var provenanceByID: [String: PhotoImportManifest.Item] = [:]
         // A consistency retry reuses a prior file list, never its old choices.
         var loaded = scanned.map { PhotoItem(url: $0.url, companions: $0.companions, fileSize: $0.fileSize, modificationDate: $0.modificationDate) }
         var legacy = 0, changed = 0
@@ -334,33 +444,53 @@ final class LibraryModel {
             if let record = workspace.records[key], record.fingerprint == fingerprint { records[id] = record }
             else { records[id] = PhotoWorkspaceRecord(fingerprint: fingerprint) }
             loaded[i].analysis = cache[newStore.analysisKey(for: loaded[i])]
+            let relative = Self.importRelativePath(loaded[i].url, album: url)
+            provenanceByID[id] = metadataByRelative[relative]
+            if loaded[i].analysis?.captureDate == nil,
+               let date = metadataByRelative[relative]?.captureDateOverride {
+                loaded[i].analysis?.captureDate = date
+            }
         }
         if legacy > 0 { messages.append("Restored \(legacy) legacy choices without file identity. Review them before export; future saves track identity.") }
         if changed > 0 { messages.append("\(changed) files changed since the saved choices. Their old choices were not applied.") }
         if loaded.isEmpty { messages.append("No supported photos were found. Enable Include subfolders to scan nested folders.") }
         return LoadedAlbum(store: newStore, items: loaded, records: records, fingerprints: fingerprints, analysisCache: cache,
-                           savedDecisions: decisions, savedRecords: workspace.records, messages: messages)
+                           savedDecisions: decisions, savedRecords: workspace.records, messages: messages, importManifest: manifest, provenanceByID: provenanceByID)
     }
     func openRecent(_ album: RecentAlbum) { recursive = album.recursive; Task { await open(URL(fileURLWithPath: album.path)) } }
     func beginPhotosImport() throws -> URL {
-        guard !isChoosingDestination, !isImporting, !isExporting, !isOpening else { throw CocoaError(.userCancelled) }
-        let album = io.root.appendingPathComponent("Imports/Photos-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: album, withIntermediateDirectories: true)
-        isImporting = true
-        return album
+        guard canImport else { throw CocoaError(.userCancelled) }
+        let staging = io.root.appendingPathComponent("Staging/Photos-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        do { try ImportScratchRecovery.mark(staging) }
+        catch { try? FileManager.default.removeItem(at: staging); throw error }
+        ownedPhotosScratch.insert(staging)
+        photosStaging = staging; isImporting = true; importProgress = "Receiving selected Apple Photos representations…"
+        return staging
     }
-    func finishPhotosImport(_ album: URL?) async {
-        isImporting = false
-        if let album { await open(album) }
+    func finishPhotosImport(_ album: URL?, expectedStaging: URL? = nil, metadataByPath: [String: PhotoImportMetadata] = [:]) async {
+        guard let expected = expectedStaging ?? album else { return }
+        guard let staging = photosStaging, expected == staging, album == nil || album == staging else {
+            if ownedPhotosScratch.remove(expected) != nil { await Self.removeImportScratch(expected) }
+            return
+        }
+        ownedPhotosScratch.remove(staging)
+        photosStaging = nil; isImporting = false; importProgress = ""
+        if let album { await importFiles([album], source: .applePhotos, metadataByPath: metadataByPath) }
+        await Self.removeImportScratch(staging)
     }
-    nonisolated static func storeImportedImage(_ data: Data, index: Int, in album: URL) throws {
-        guard index >= 0,
+    private nonisolated static func removeImportScratch(_ url: URL) async {
+        await Task.detached(priority: .utility) { try? FileManager.default.removeItem(at: url) }.value
+    }
+    @discardableResult nonisolated static func storeImportedImage(_ data: Data, index: Int, in album: URL) throws -> URL {
+        guard (0..<5_000).contains(index), data.count <= 536_870_912,
               let source = CGImageSourceCreateWithData(data as CFData, nil), let type = CGImageSourceGetType(source),
               let ext = UTType(type as String)?.preferredFilenameExtension,
               ImageLoader.supportedExtensions.contains(ext.lowercased()) else { throw CocoaError(.fileReadCorruptFile) }
         let destination = album.appendingPathComponent(String(format: "Photo_%05d", index + 1)).appendingPathExtension(ext)
         guard !FileManager.default.fileExists(atPath: destination.path) else { throw CocoaError(.fileWriteFileExists) }
         try data.write(to: destination, options: .atomic)
+        return destination
     }
     private func startAnalysis() {
         struct Job: Sendable { let id: String; let url: URL; let fallback: URL?; let fingerprint: String; let cacheKey: String }
@@ -406,7 +536,9 @@ final class LibraryModel {
         }
         switch result {
         case .success(let analysis):
-            items[index].analysis = analysis; items[index].analysisError = nil
+            var display = analysis
+            if display.captureDate == nil { display.captureDate = captureDateOverrides[id] }
+            items[index].analysis = display; items[index].analysisError = nil
             analysisCache[cacheKey] = analysis
         case .failure(let error): items[index].analysisError = error.localizedDescription
         }
@@ -474,7 +606,7 @@ final class LibraryModel {
         recordExamples(for: targets.map(\.id)); reevaluate(); scheduleSave()
     }
     func acceptSuggestions() {
-        guard !isAnalyzing, !isExporting else { return }
+        guard !isAnalyzing, !isExporting, !isImporting, !isOpening, !isChoosingDestination else { return }
         let targets = items.indices.filter { items[$0].decision == .undecided && items[$0].suggestion != .undecided && !items[$0].needsReview }
         guard !targets.isEmpty else { alert = AlertMessage(title: "Nothing ready to accept", message: "Uncertain or incomplete photos stay undecided for your review."); return }
         remember("Accept suggestions")
@@ -483,7 +615,7 @@ final class LibraryModel {
         alert = AlertMessage(title: "Suggestions applied", message: "\(targets.count) choices applied. Undo restores all of them. Photos needing review remain undecided.")
     }
     func suggestTargetCount() {
-        guard !isAnalyzing else { return }
+        guard !isAnalyzing, !isImporting, !isOpening, !isChoosingDestination else { return }
         let proposed = Scorer.cullToTarget(&items, count: targetCount)
         reconcileSelection(); layoutVersion &+= 1
         alert = AlertMessage(title: "Target selection ready", message: "\(proposed) suggested picks. Review these suggestions, then accept them. Your existing choices were preserved.")
@@ -851,6 +983,9 @@ final class LibraryModel {
         request.continuation.resume(returning: url)
     }
     func cancelDestinationSelection() {
+        if let panel = sourcePanel {
+            sourcePanelRequest = UUID(); sourcePanel = nil; isChoosingDestination = false; panel.cancel(nil)
+        }
         destinationIntent = UUID()
         guard let requestID = destinationRequest?.id else { return }
         cancelDestinationSelection(requestID)

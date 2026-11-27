@@ -2,7 +2,7 @@
 # Read-only app ZIP/CLI validation. Never launches or installs software.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
-EXPECTED_VERSION="${3:-${VERSION:-0.2.0}}"
+EXPECTED_VERSION="${3:-${VERSION:-0.3.0}}"
 ARCHIVE="${1:-$REPO/dist/OpenCull-${EXPECTED_VERSION}-macOS.zip}"
 CLI="${2:-$REPO/dist/opencull-cli}"
 if [[ ! -f "$ARCHIVE" || ! -f "$CLI" ]]; then

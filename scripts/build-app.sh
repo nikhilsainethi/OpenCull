@@ -2,9 +2,9 @@
 # Build and verify outside synced Documents directories. Preserve prior outputs.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
-RELEASE_VERSION="${VERSION:-0.2.0}"
+RELEASE_VERSION="${VERSION:-0.3.0}"
 if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "VERSION must have three numeric components (for example 0.2.0)." >&2
+    echo "VERSION must have three numeric components (for example 0.3.0)." >&2
     exit 2
 fi
 SDK_VERSION="$(xcrun --sdk macosx --show-sdk-version)"

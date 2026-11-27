@@ -54,24 +54,58 @@ public struct FaceInfo: Codable, Sendable, Equatable {
     /// Laplacian sharpness measured inside the face box.
     public var sharpness: Float?
 
-    public init(boundingBox: CGRect, captureQuality: Float? = nil, eyeOpenness: Float? = nil, sharpness: Float? = nil) {
+    /// Individual landmark ratios. Unlike the legacy aggregate, these retain a wink.
+    public var leftEyeOpenness: Float?
+    public var rightEyeOpenness: Float?
+    /// Landmark/geometry support (0...1), not a calibrated likelihood of closed eyes.
+    /// Nil means that measurement reliability was not established.
+    public var leftEyeConfidence: Float?
+    public var rightEyeConfidence: Float?
+    /// Vision head orientation in radians. Head direction is not eye gaze.
+    public var yaw: Float?
+    public var pitch: Float?
+    public var roll: Float?
+    /// Pupil location inside oriented eye bounds, with (0.5, 0.5) at the center.
+    /// Missing pupils, profiles and low support must remain unknown attention.
+    public var leftPupilPosition: CGPoint?
+    public var rightPupilPosition: CGPoint?
+
+    public init(boundingBox: CGRect, captureQuality: Float? = nil, eyeOpenness: Float? = nil, sharpness: Float? = nil,
+                leftEyeOpenness: Float? = nil, rightEyeOpenness: Float? = nil,
+                leftEyeConfidence: Float? = nil, rightEyeConfidence: Float? = nil,
+                yaw: Float? = nil, pitch: Float? = nil, roll: Float? = nil,
+                leftPupilPosition: CGPoint? = nil, rightPupilPosition: CGPoint? = nil) {
         self.boundingBox = boundingBox
         self.captureQuality = captureQuality
-        self.eyeOpenness = eyeOpenness
+        self.eyeOpenness = eyeOpenness ?? [leftEyeOpenness, rightEyeOpenness].compactMap { $0 }.filter { $0.isFinite && (0...1).contains($0) }.max()
         self.sharpness = sharpness
+        self.leftEyeOpenness = leftEyeOpenness
+        self.rightEyeOpenness = rightEyeOpenness
+        self.leftEyeConfidence = leftEyeConfidence
+        self.rightEyeConfidence = rightEyeConfidence
+        self.yaw = yaw
+        self.pitch = pitch
+        self.roll = roll
+        self.leftPupilPosition = leftPupilPosition
+        self.rightPupilPosition = rightPupilPosition
     }
 
     /// Faces smaller than this (as a fraction of image width) are too small for reliable
     /// eye and sharpness measurements, so they are ignored for those checks.
     public static let minimumSignificantWidth: CGFloat = 0.05
 
-    public var isSignificant: Bool { boundingBox.width >= Self.minimumSignificantWidth }
+    public var isSignificant: Bool {
+        let b = boundingBox
+        return b.origin.x.isFinite && b.origin.y.isFinite && b.width.isFinite && b.height.isFinite
+            && b.minX >= 0 && b.minY >= 0 && b.maxX <= 1.0001 && b.maxY <= 1.0001
+            && b.width >= Self.minimumSignificantWidth && b.height > 0
+    }
 }
 
 /// Everything measured about one photo. Expensive to compute, so it is cached.
 public struct PhotoAnalysis: Codable, Sendable, Equatable {
     /// Bump this when the analysis changes so old cached results are recomputed.
-    public static let currentVersion = 3
+    public static let currentVersion = 4
 
     public var version: Int = PhotoAnalysis.currentVersion
     public var pixelWidth: Int

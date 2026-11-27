@@ -187,8 +187,12 @@ private final class PhotoCanvasView: NSView, ReviewKeyboardResponder {
             let rect = CGRect(x: imageRect.minX + box.minX * imageRect.width, y: imageRect.minY + box.minY * imageRect.height,
                               width: box.width * imageRect.width, height: box.height * imageRect.height)
             let color: NSColor
-            if !face.isSignificant || face.eyeOpenness == nil { color = .systemGray }
-            else { color = (face.eyeOpenness ?? 1) < threshold ? .systemRed : .systemGreen }
+            switch PeopleAssessment.assess(face, eyesClosedThreshold: threshold).eyeState {
+            case .unknown: color = .systemGray
+            case .closed: color = .systemRed
+            case .oneEyeClosed: color = .systemOrange
+            case .open: color = .systemGreen
+            }
             color.setStroke()
             let path = NSBezierPath(rect: rect); path.lineWidth = index == keyFace ? 4 : 2; path.stroke()
         }

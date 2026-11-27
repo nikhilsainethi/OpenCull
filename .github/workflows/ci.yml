@@ -29,8 +29,8 @@ jobs:
       - name: Retain verified build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: OpenCull-0.2.0-macOS
+          name: OpenCull-0.3.0-macOS
           path: |
-            dist/OpenCull-0.2.0-macOS.zip
+            dist/OpenCull-0.3.0-macOS.zip
             dist/opencull-cli
             dist/release-verification.txt

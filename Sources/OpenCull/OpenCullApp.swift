@@ -18,7 +18,9 @@ struct OpenCullApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("Open Folder…") { model.showOpenPanel() }
                     .keyboardShortcut("o")
-                    .disabled(model.isChoosingDestination || model.isExporting || model.isImporting || model.isOpening)
+                    .disabled(!model.canImport)
+                Button("Import Files or ZIP…") { model.showImportPanel() }
+                    .keyboardShortcut("i").disabled(!model.canImport)
             }
             CommandGroup(replacing: .undoRedo) {
                 Button(EditingUndoRouter.textManager(NSApp.keyWindow?.firstResponder)?.undoMenuItemTitle ?? model.undoTitle) {

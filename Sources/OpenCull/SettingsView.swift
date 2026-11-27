@@ -22,6 +22,14 @@ struct SettingsView: View {
                 LabeledSlider(title: "Semantic floor for layout rescue", value: floatBinding($model.grouping.minimumSemanticForLayout), range: 0.3...0.95, step: 0.01,
                               format: { String(format: "%.2f", $0) })
             }
+            Section("Shooting intent") {
+                Picker("Photographs", selection: $model.scoring.shootingIntent) {
+                    ForEach(ShootingIntent.allCases) { Text($0.title).tag($0) }
+                }
+                Text(model.scoring.shootingIntent.help).font(.caption).foregroundStyle(.secondary)
+                Text("Eye and camera-attention checks are estimates. Review uncertain faces, profiles, occlusions and intentional expressions.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("Problem detection") {
                 LabeledSlider(title: "Eyes closed below", value: floatBinding($model.scoring.eyesClosedThreshold), range: 0.05...0.3, step: 0.01,
                               format: { String(format: "%.2f", $0) })

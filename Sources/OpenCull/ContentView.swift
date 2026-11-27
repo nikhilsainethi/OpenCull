@@ -9,6 +9,10 @@ struct ContentView: View {
     @State private var exportSheet = false
     @State private var photoSelection: [PhotosPickerItem] = []
     @State private var importingPhotos = false
+    @State private var importSheet = false
+    @State private var isDropTargeted = false
+    @State private var photoImportID = UUID()
+    @State private var photoImportTask: Task<Void, Never>?
 
     var body: some View {
         @Bindable var model = model
@@ -43,15 +47,37 @@ struct ContentView: View {
                 statusBar
             }
         }
-        .frame(minWidth: 1080, minHeight: 680)
-        .disabled(model.isOpening)
+        .environment(model)
+        .photoDropDestination(isEnabled: model.canImport, cancellationID: model.importCancellationID, onFiles: { payload in
+            Task {
+                defer { Task.detached { payload.cleanup() } }
+                if let receipt = payload.receiptID, !model.finishDropReceipt(receipt) { return }
+                await model.importFiles(payload.urls, source: .files)
+            }
+        }, onFailure: { message in
+            model.alert = AlertMessage(title: "Drop needs a local file", message: message)
+        }, onTargeted: { isDropTargeted = $0 }, onReceiving: { model.beginDropReceipt($0) },
+           onReceiptEnded: { model.finishDropReceipt($0) })
         .overlay {
-            if model.isOpening {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 12).stroke(.tint, lineWidth: 4).padding(8).allowsHitTesting(false)
+            }
+        }
+        .frame(minWidth: 1080, minHeight: 680)
+        .disabled(model.isOpening || model.isImporting)
+        .overlay {
+            if model.isOpening || model.isImporting {
                 VStack(spacing: 12) {
-                    ProgressView("Opening photo folder…")
-                    Text("Reading files and saved choices. You can cancel without changing the current album.")
+                    ProgressView(model.isImporting ? model.importProgress : "Opening photo folder…")
+                    Text(model.isImporting ? "Building a local album. Your current album stays available if you cancel." : "Reading files and saved choices. You can cancel without changing the current album.")
                         .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    Button("Cancel opening", action: model.cancelOpening)
+                    Button(model.isImporting ? "Cancel import" : "Cancel opening") {
+                        if model.isImporting {
+                            photoImportTask?.cancel(); photoImportID = UUID(); photoImportTask = nil
+                            importingPhotos = false; photoSelection = []; model.cancelImport()
+                        }
+                        else { model.cancelOpening() }
+                    }
                 }.padding(24).frame(width: 340).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
@@ -60,6 +86,7 @@ struct ContentView: View {
             ToolbarItem(placement: .navigation) {
                 Menu {
                     Button("Open folder…", action: model.showOpenPanel)
+                    Button("Import photos or ZIP…") { importSheet = true }
                     Toggle("Include subfolders", isOn: $model.recursive)
                     if !model.recentAlbums.isEmpty {
                         Divider()
@@ -70,7 +97,10 @@ struct ContentView: View {
                 } label: { Label("Albums", systemImage: "folder") }
                 .disabled(model.isChoosingDestination || model.isExporting || model.isImporting || model.isOpening)
             }
-            ToolbarItem { PhotosPicker(selection: $photoSelection, matching: .images) { Label("Photos", systemImage: "photo.on.rectangle") }.disabled(model.isChoosingDestination || importingPhotos || model.isExporting || model.isOpening) }
+            ToolbarItem {
+                Button { importSheet = true } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    .disabled(!model.canImport || importingPhotos)
+            }
             ToolbarItem(placement: .principal) {
                 Picker("Workspace", selection: $model.mode) {
                     ForEach(WorkspaceMode.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
@@ -86,34 +116,43 @@ struct ContentView: View {
                     .disabled(model.isChoosingDestination || model.folder == nil || model.isExporting || model.isImporting || model.isOpening)
             }
         }
+        .sheet(isPresented: $importSheet) { ImportSourcesView(photoSelection: $photoSelection) }
         .sheet(isPresented: $exportSheet) { ExportSheet() }
         .alert(item: $model.alert) { Alert(title: Text($0.title), message: Text($0.message)) }
-        .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first else { return false }
-            // Directory validation belongs to the detached loader too: even a
-            // resource-value lookup can wait on a cloud provider or permission.
-            Task { await model.open(url) }; return true
-        }
         .onChange(of: photoSelection) { _, selection in
             guard !selection.isEmpty else { return }
             importingPhotos = true
-            Task {
+            let request = UUID(); photoImportID = request
+            photoImportTask = Task {
                 var album: URL?
-                var imported = 0
+                defer {
+                    if let album { Task.detached { try? FileManager.default.removeItem(at: album) } }
+                    if photoImportID == request { importingPhotos = false; photoSelection = []; photoImportTask = nil }
+                }
                 do {
                     let destination = try model.beginPhotosImport()
                     album = destination
+                    var metadata: [String: PhotoImportMetadata] = [:]
+                    var budget = try PhotoSelectionBudget(selectionCount: selection.count)
                     for (index, item) in selection.enumerated() {
+                        try Task.checkCancellation()
                         guard let data = try await item.loadTransferable(type: Data.self) else { throw CocoaError(.fileReadCorruptFile) }
-                        try await Task.detached(priority: .userInitiated) { try LibraryModel.storeImportedImage(data, index: index, in: destination) }.value
-                        imported += 1
+                        try Task.checkCancellation()
+                        try budget.receive(byteCount: data.count)
+                        let url = try await Task.detached(priority: .userInitiated) {
+                            try LibraryModel.storeImportedImage(data, index: index, in: destination)
+                        }.value
+                        metadata[url.standardizedFileURL.path] = PhotoImportMetadata(assetIdentifier: item.itemIdentifier,
+                            representationQuality: "System picker representation; original quality unverified")
                     }
-                    await model.finishPhotosImport(destination)
+                    try Task.checkCancellation()
+                    await model.finishPhotosImport(destination, expectedStaging: destination, metadataByPath: metadata)
                 } catch {
-                    await model.finishPhotosImport(imported > 0 ? album : nil)
-                    model.alert = AlertMessage(title: "Photos import needs attention", message: "Imported \(imported) of \(selection.count) chosen photos. " + error.localizedDescription)
+                    await model.finishPhotosImport(nil, expectedStaging: album)
+                    if photoImportID == request && !(error is CancellationError) {
+                        model.alert = AlertMessage(title: "Photos import needs attention", message: "The selected batch was not imported. " + error.localizedDescription)
+                    }
                 }
-                importingPhotos = false; photoSelection = []
             }
         }
         .onAppear {
@@ -123,17 +162,22 @@ struct ContentView: View {
                 Task { await model.open(URL(fileURLWithPath: arguments[index + 1])) }
             }
         }
-        .onDisappear { keyMonitor.stop(); model.cancelDestinationSelection(); model.cancelOpening(); _ = model.flushPendingSaves() }
+        .onDisappear { photoImportTask?.cancel(); model.cancelImport(); keyMonitor.stop(); model.cancelDestinationSelection(); model.cancelOpening(); _ = model.flushPendingSaves() }
     }
 
     private var albumBar: some View {
-        HStack(spacing: 12) {
+        @Bindable var model = model
+        return HStack(spacing: 12) {
             Image(systemName: "camera.aperture").font(.title2).foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.folder?.lastPathComponent ?? "Album").font(.headline)
                 Text("\(model.counts.total) photos · \(model.visibleItems.count) visible").font(.caption).foregroundStyle(.secondary)
+                if let manifest = model.importManifest { Text(manifest.sourceSummary).font(.caption2).foregroundStyle(.secondary) }
             }
             Spacer()
+            Picker("Shooting intent", selection: $model.scoring.shootingIntent) {
+                ForEach(ShootingIntent.allCases) { Text($0.title).tag($0) }
+            }.frame(maxWidth: 245).help(model.scoring.shootingIntent.help)
             if model.mode == .compare { Text("⌘-click up to four photos to compare").font(.caption).foregroundStyle(.secondary) }
             Menu {
                 Button("Select all visible", action: model.selectAllVisible)
@@ -174,7 +218,7 @@ struct ContentView: View {
                 ProgressView(value: Double(model.analyzedCount), total: Double(max(1, model.items.count))).frame(width: 100)
                 Text("Analyzing \(model.analyzedCount) / \(model.items.count)")
             } else if model.isExporting { ProgressView().controlSize(.small); Text(model.exportProgress) }
-            else if model.isImporting { ProgressView().controlSize(.small); Text("Importing chosen Photos images…") }
+            else if model.isImporting { ProgressView().controlSize(.small); Text(model.importProgress) }
             else if model.isFindingDuplicates { ProgressView().controlSize(.small); Text("Checking exact duplicates…") }
             else { Text("\(model.items.filter(\.needsReview).count) need review") }
             Spacer()
@@ -194,6 +238,8 @@ struct ContentView: View {
             Text("Cull, compare, and edit on your Mac.\nOriginals stay untouched.")
                 .font(.title3).multilineTextAlignment(.center).foregroundStyle(.secondary)
             Button("Open a photo folder…", action: model.showOpenPanel).buttonStyle(.borderedProminent).controlSize(.large)
+            Button("Import from Files, Photos or Google Photos…") { importSheet = true }.controlSize(.large)
+            Text("Or drop local photos, folders or ZIPs here.").font(.caption).foregroundStyle(.secondary)
             Toggle("Include subfolders", isOn: Binding(get: { model.recursive }, set: { model.recursive = $0 })).toggleStyle(.checkbox)
             if !model.recentAlbums.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
@@ -211,7 +257,7 @@ struct ContentView: View {
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
-        guard model.folder != nil, !model.isOpening, !model.isChoosingDestination, let reviewWindow = model.window, event.window === reviewWindow else { return false }
+        guard model.folder != nil, !model.isImporting, !model.isOpening, !model.isChoosingDestination, let reviewWindow = model.window, event.window === reviewWindow else { return false }
         if ReviewKeyboardNavigation.handleSelectAll(event, responder: event.window?.firstResponder, workspace: model.selectAllVisible) { return true }
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
               ReviewKeyboardNavigation.allows(event.window?.firstResponder, mode: model.mode) else { return false }
