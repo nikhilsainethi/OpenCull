@@ -9,6 +9,12 @@ import XCTest
 }
 
 final class NativeInteractionRoutingTests: XCTestCase {
+    private func event(_ modifiers: NSEvent.ModifierFlags = .command, characters: String = "a", keyCode: UInt16 = 0) throws -> NSEvent {
+        try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                                       windowNumber: 0, context: nil, characters: characters, charactersIgnoringModifiers: characters,
+                                       isARepeat: false, keyCode: keyCode))
+    }
+
     @MainActor func testEditorControlsKeepNativeArrowKeys() {
         XCTAssertFalse(ReviewKeyboardNavigation.allows(NSSlider(), mode: .edit))
         XCTAssertFalse(ReviewKeyboardNavigation.allows(NSPopUpButton(), mode: .cull))
@@ -44,5 +50,24 @@ final class NativeInteractionRoutingTests: XCTestCase {
         XCTAssertFalse(workspaceCalled)
         EditingUndoRouter.selectAll(NSView(), workspace: { workspaceCalled = true })
         XCTAssertTrue(workspaceCalled)
+    }
+
+    @MainActor func testCommandAEventSelectsTextBeforeSwiftUIMenuDispatch() throws {
+        let text = NSTextView(); text.string = "never"; text.setSelectedRange(NSRange(location: 5, length: 0))
+        var workspaceCalled = false
+        XCTAssertTrue(ReviewKeyboardNavigation.handleSelectAll(try event(), responder: text, workspace: { workspaceCalled = true }))
+        XCTAssertEqual(text.selectedRange(), NSRange(location: 0, length: 5))
+        XCTAssertFalse(workspaceCalled)
+        XCTAssertTrue(ReviewKeyboardNavigation.handleSelectAll(try event(), responder: NSView(), workspace: { workspaceCalled = true }))
+        XCTAssertTrue(workspaceCalled)
+    }
+
+    @MainActor func testSelectAllEventLeavesOtherKeyboardCommandsUntouched() throws {
+        var workspaceCalled = false
+        for modifiers: NSEvent.ModifierFlags in [[], .shift, [.command, .shift], [.command, .option], [.command, .control]] {
+            XCTAssertFalse(ReviewKeyboardNavigation.handleSelectAll(try event(modifiers), responder: nil, workspace: { workspaceCalled = true }))
+        }
+        XCTAssertFalse(ReviewKeyboardNavigation.handleSelectAll(try event(.command, characters: "q"), responder: nil, workspace: { workspaceCalled = true }), "Interpret the shortcut's character, not a physical US keyboard position")
+        XCTAssertFalse(workspaceCalled)
     }
 }

@@ -53,6 +53,8 @@ private struct LoadedAlbum: @unchecked Sendable {
     let messages: [String]
 }
 
+typealias DestinationPanelPresenter = @MainActor (String, @escaping @MainActor (URL?) -> Void) -> (@MainActor () -> Void)
+
 @MainActor @Observable
 final class LibraryModel {
     private(set) var folder: URL?
@@ -73,6 +75,7 @@ final class LibraryModel {
     private(set) var isAnalyzing = false
     private(set) var analyzedCount = 0
     private(set) var isExporting = false
+    private(set) var isChoosingDestination = false
     private(set) var exportProgress = ""
     private(set) var isFindingDuplicates = false
     private(set) var isImporting = false
@@ -92,6 +95,10 @@ final class LibraryModel {
     @ObservationIgnored private let io: WorkspaceIO
     @ObservationIgnored private let analyzePhoto: @Sendable (URL, URL?) throws -> PhotoAnalysis
     @ObservationIgnored private let scanPhotos: @Sendable (URL, Bool) throws -> [PhotoItem]
+    @ObservationIgnored private let presentDestination: DestinationPanelPresenter
+    @ObservationIgnored private var destinationIntent = UUID()
+    @ObservationIgnored private var destinationRequest: (id: UUID, continuation: CheckedContinuation<URL?, Never>)?
+    @ObservationIgnored private var cancelDestinationPanel: (@MainActor () -> Void)?
     @ObservationIgnored private var store: SessionStore?
     @ObservationIgnored private var analysisCache: [String: PhotoAnalysis] = [:]
     @ObservationIgnored private var fingerprints: [String: String] = [:]
@@ -119,10 +126,12 @@ final class LibraryModel {
 
     init(appDataDirectory: URL? = nil, defaults: UserDefaults = .standard,
          analyze: @escaping @Sendable (URL, URL?) throws -> PhotoAnalysis = { try PhotoAnalyzer().analyze(url: $0, fallback: $1) },
-         scan: @escaping @Sendable (URL, Bool) throws -> [PhotoItem] = { try PhotoScanner.scan(folder: $0, recursive: $1) }) {
+         scan: @escaping @Sendable (URL, Bool) throws -> [PhotoItem] = { try PhotoScanner.scan(folder: $0, recursive: $1) },
+         presentDestination: @escaping DestinationPanelPresenter = LibraryModel.presentDestinationPanel) {
         self.defaults = defaults
         analyzePhoto = analyze
         scanPhotos = scan
+        self.presentDestination = presentDestination
         let root = appDataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("OpenCull", isDirectory: true)
         io = WorkspaceIO(root: root)
@@ -210,13 +219,14 @@ final class LibraryModel {
 
     // MARK: Import and analysis
     func showOpenPanel() {
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.prompt = "Open album"; panel.message = "Choose a folder of photos"
         if panel.runModal() == .OK, let url = panel.url { Task { await open(url) } }
     }
     func open(_ url: URL) async {
-        guard !isExporting, !isImporting else { return }
+        guard !isChoosingDestination, !isExporting, !isImporting else { return }
         guard flushPendingSaves() else { return }
         openingTask?.cancel()
         let request = UUID(), recursive = recursive, scan = scanPhotos
@@ -333,7 +343,7 @@ final class LibraryModel {
     }
     func openRecent(_ album: RecentAlbum) { recursive = album.recursive; Task { await open(URL(fileURLWithPath: album.path)) } }
     func beginPhotosImport() throws -> URL {
-        guard !isImporting, !isExporting, !isOpening else { throw CocoaError(.userCancelled) }
+        guard !isChoosingDestination, !isImporting, !isExporting, !isOpening else { throw CocoaError(.userCancelled) }
         let album = io.root.appendingPathComponent("Imports/Photos-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: album, withIntermediateDirectories: true)
         isImporting = true
@@ -743,7 +753,7 @@ final class LibraryModel {
         return true
     }
     func writeSidecars() {
-        guard !isExporting, !isAnalyzing, !isImporting, !isOpening else { return }
+        guard !isChoosingDestination, !isExporting, !isAnalyzing, !isImporting, !isOpening else { return }
         let candidates = items.filter { $0.decision != .undecided || $0.rating > 0 || records[$0.id]?.exported == true }
         guard validateExportInputs(candidates), let store else { return }
         let expected = fingerprints
@@ -779,13 +789,18 @@ final class LibraryModel {
         }
     }
     func copyPicks() {
-        guard !isExporting, !isImporting, !isOpening else { return }
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening else { return }
         let picks = items.filter { $0.decision == .pick }
-        guard !picks.isEmpty, let destination = chooseDestination(message: "Copy \(picks.count) picked original photo bundles") else { return }
-        copy(picks, to: destination)
+        let token = generation, intent = destinationIntent
+        guard !picks.isEmpty else { return }
+        Task {
+            guard let destination = await chooseDestination(message: "Copy \(picks.count) picked original photo bundles"),
+                  generation == token, destinationIntent == intent, !Task.isCancelled else { return }
+            copy(picks, to: destination)
+        }
     }
     func copy(_ photos: [PhotoItem], to destination: URL) {
-        guard !isExporting, !isImporting, !isOpening, !photos.isEmpty else { return }
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening, !photos.isEmpty else { return }
         guard validateExportInputs(photos), let store else { return }
         let expected = fingerprints
         if let folder, destination.resolvingSymlinksInPath().standardizedFileURL == folder.resolvingSymlinksInPath().standardizedFileURL {
@@ -800,18 +815,76 @@ final class LibraryModel {
             alert = AlertMessage(title: result.failures.isEmpty && result.warnings.isEmpty ? "Originals copied" : "Copy needs attention", message: "Copied \(result.copiedPhotos) complete photo bundles. Skipped \(result.skippedExisting) existing files.\n" + (result.failures + result.warnings).joined(separator: "\n"))
         }
     }
-    func chooseDestination(message: String) -> URL? {
+    /// Uses AppKit's completion API rather than entering a nested modal run loop.
+    /// The injected presenter keeps cancellation and rapid-action races testable.
+    func chooseDestination(message: String) async -> URL? {
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening, !Task.isCancelled else { return nil }
+        let requestID = UUID(), intent = destinationIntent
+        isChoosingDestination = true
+        let result: URL? = await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else {
+                    isChoosingDestination = false
+                    continuation.resume(returning: nil)
+                    return
+                }
+                destinationRequest = (requestID, continuation)
+                let cancel = presentDestination(message) { [weak self] url in
+                    self?.finishDestinationSelection(requestID, url: url)
+                }
+                if destinationRequest?.id == requestID { cancelDestinationPanel = cancel }
+            }
+        } onCancel: { [weak self] in
+            Task { @MainActor in self?.cancelDestinationSelection(requestID) }
+        }
+        return Task.isCancelled || destinationIntent != intent ? nil : result
+    }
+    private static func presentDestinationPanel(message: String, completion: @escaping @MainActor (URL?) -> Void) -> @MainActor () -> Void {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.canCreateDirectories = true; panel.prompt = "Export here"; panel.message = message
-        return panel.runModal() == .OK ? panel.url : nil
+        panel.begin { response in completion(response == .OK ? panel.url : nil) }
+        return { panel.cancel(nil) }
+    }
+    private func finishDestinationSelection(_ requestID: UUID, url: URL?) {
+        guard let request = destinationRequest, request.id == requestID else { return }
+        destinationRequest = nil; cancelDestinationPanel = nil; isChoosingDestination = false
+        request.continuation.resume(returning: url)
+    }
+    func cancelDestinationSelection() {
+        destinationIntent = UUID()
+        guard let requestID = destinationRequest?.id else { return }
+        cancelDestinationSelection(requestID)
+    }
+    private func cancelDestinationSelection(_ requestID: UUID) {
+        guard destinationRequest?.id == requestID else { return }
+        let cancel = cancelDestinationPanel
+        finishDestinationSelection(requestID, url: nil)
+        cancel?()
+    }
+    /// Captures export intent before showing UI, so a later selection/edit cannot
+    /// silently change the requested photographs or their rendered appearance.
+    func chooseAndExportEdited(format: ImageExportFormat, quality: Double, maxPixelSize: Int?, metadata: ExportMetadataPolicy, allPicks: Bool) async -> Bool {
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening else { return false }
+        let photos = allPicks ? items.filter { $0.decision == .pick } : selectedItems
+        guard !photos.isEmpty, validateExportInputs(photos), let store else { return false }
+        let jobs = photos.map { ($0, recipe(for: $0)) }, expected = fingerprints, token = generation, intent = destinationIntent
+        guard let destination = await chooseDestination(message: "Choose a folder for rendered copies"),
+              generation == token, destinationIntent == intent, !Task.isCancelled else { return false }
+        return startEditedExport(jobs: jobs, expected: expected, store: store, to: destination, format: format,
+                                 quality: quality, maxPixelSize: maxPixelSize, metadata: metadata)
     }
     func exportEdited(to destination: URL, format: ImageExportFormat, quality: Double, maxPixelSize: Int?, metadata: ExportMetadataPolicy, allPicks: Bool) {
-        guard !isExporting, !isImporting, !isOpening else { return }
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening else { return }
         let photos = allPicks ? items.filter { $0.decision == .pick } : selectedItems
         guard !photos.isEmpty else { alert = AlertMessage(title: "No photos selected", message: "Select photos or mark picks before exporting."); return }
-        guard validateExportInputs(photos), let store else { return }
-        let expected = fingerprints
-        let jobs = photos.map { ($0, recipe(for: $0)) }
+        guard let store else { return }
+        _ = startEditedExport(jobs: photos.map { ($0, recipe(for: $0)) }, expected: fingerprints, store: store,
+                              to: destination, format: format, quality: quality, maxPixelSize: maxPixelSize, metadata: metadata)
+    }
+    private func startEditedExport(jobs: [(PhotoItem, EditRecipe)], expected: [String: String], store: SessionStore,
+                                  to destination: URL, format: ImageExportFormat, quality: Double, maxPixelSize: Int?, metadata: ExportMetadataPolicy) -> Bool {
+        guard !isChoosingDestination, !isExporting, !isImporting, !isOpening,
+              validateExportInputs(jobs.map { $0.0 }) else { return false }
         isExporting = true; exportProgress = "Rendering 0 of \(jobs.count)…"
         Task {
             var outputs: [URL] = [], failures: [String] = [], fallbackNames: [String] = []
@@ -847,5 +920,6 @@ final class LibraryModel {
             let fallbackNote = fallbackNames.isEmpty ? "" : "\nUsed companion images because these RAW sources could not render: \(fallbackNames.joined(separator: ", ")). The copies use the companion's resolution.\n"
             alert = AlertMessage(title: failures.isEmpty ? "Edited photos exported" : "Export needs attention", message: "Rendered \(outputs.count) of \(jobs.count) photos to \(destination.path). Originals were preserved.\n" + fallbackNote + failures.joined(separator: "\n"))
         }
+        return true
     }
 }

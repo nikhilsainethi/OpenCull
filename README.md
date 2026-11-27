@@ -158,6 +158,10 @@ atomically published; existing files and symlinks are never overwritten.
    XML is reported. Independent photos sharing an XMP basename are reported as
    ambiguous; rendered copies preserve their separate choices.
 
+PNG copies preserve encoded image data, transparency and color information.
+Unsupported or conflicting PNG XMP packets are reported without publishing a
+partial photo bundle.
+
 | Choice | XMP rating | XMP label |
 |---|---|---|
 | Pick | Your stars, minimum 1 | Green |

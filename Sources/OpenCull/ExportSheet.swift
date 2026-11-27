@@ -38,14 +38,19 @@ struct ExportSheet: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Choose folder & export…") {
-                    guard let destination = model.chooseDestination(message: "Choose a folder for rendered copies") else { return }
-                    dismiss()
-                    model.exportEdited(to: destination, format: format, quality: quality, maxPixelSize: size == 0 ? nil : size,
-                                       metadata: stripMetadata ? .remove : .preserve, allPicks: allPicks)
+                    let format = format, quality = quality, maxPixelSize = size == 0 ? nil : size
+                    let metadata: ExportMetadataPolicy = stripMetadata ? .remove : .preserve
+                    let allPicks = allPicks
+                    Task {
+                        if await model.chooseAndExportEdited(format: format, quality: quality, maxPixelSize: maxPixelSize,
+                                                             metadata: metadata, allPicks: allPicks) { dismiss() }
+                    }
                 }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                     .disabled(allPicks ? model.counts.picks == 0 : model.selectedItems.isEmpty)
             }
         }.padding(24).frame(width: 570)
+        .disabled(model.isChoosingDestination)
+        .interactiveDismissDisabled(model.isChoosingDestination)
         .onAppear { if model.counts.picks == 0 { allPicks = false } }
     }
 }

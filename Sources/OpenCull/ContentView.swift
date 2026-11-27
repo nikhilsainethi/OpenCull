@@ -68,9 +68,9 @@ struct ContentView: View {
                         }
                     }
                 } label: { Label("Albums", systemImage: "folder") }
-                .disabled(model.isExporting || model.isImporting || model.isOpening)
+                .disabled(model.isChoosingDestination || model.isExporting || model.isImporting || model.isOpening)
             }
-            ToolbarItem { PhotosPicker(selection: $photoSelection, matching: .images) { Label("Photos", systemImage: "photo.on.rectangle") }.disabled(importingPhotos || model.isExporting || model.isOpening) }
+            ToolbarItem { PhotosPicker(selection: $photoSelection, matching: .images) { Label("Photos", systemImage: "photo.on.rectangle") }.disabled(model.isChoosingDestination || importingPhotos || model.isExporting || model.isOpening) }
             ToolbarItem(placement: .principal) {
                 Picker("Workspace", selection: $model.mode) {
                     ForEach(WorkspaceMode.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
@@ -78,12 +78,12 @@ struct ContentView: View {
             }
             ToolbarItem {
                 Button { model.acceptSuggestions() } label: { Label("Accept", systemImage: "wand.and.stars") }
-                    .disabled(model.folder == nil || model.isAnalyzing || model.isExporting || model.isOpening)
+                    .disabled(model.isChoosingDestination || model.folder == nil || model.isAnalyzing || model.isExporting || model.isOpening)
                     .help("Apply completed suggestions; uncertain photos stay undecided. Undo is available.")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { exportSheet = true } label: { Label("Export…", systemImage: "square.and.arrow.up") }
-                    .disabled(model.folder == nil || model.isExporting || model.isImporting || model.isOpening)
+                    .disabled(model.isChoosingDestination || model.folder == nil || model.isExporting || model.isImporting || model.isOpening)
             }
         }
         .sheet(isPresented: $exportSheet) { ExportSheet() }
@@ -123,7 +123,7 @@ struct ContentView: View {
                 Task { await model.open(URL(fileURLWithPath: arguments[index + 1])) }
             }
         }
-        .onDisappear { keyMonitor.stop(); model.cancelOpening(); _ = model.flushPendingSaves() }
+        .onDisappear { keyMonitor.stop(); model.cancelDestinationSelection(); model.cancelOpening(); _ = model.flushPendingSaves() }
     }
 
     private var albumBar: some View {
@@ -211,8 +211,9 @@ struct ContentView: View {
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
-        guard model.folder != nil, !model.isOpening, event.window === model.window,
-              event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+        guard model.folder != nil, !model.isOpening, !model.isChoosingDestination, let reviewWindow = model.window, event.window === reviewWindow else { return false }
+        if ReviewKeyboardNavigation.handleSelectAll(event, responder: event.window?.firstResponder, workspace: model.selectAllVisible) { return true }
+        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
               ReviewKeyboardNavigation.allows(event.window?.firstResponder, mode: model.mode) else { return false }
         switch event.keyCode {
         case 123: model.selectPrevious(); return true
@@ -240,6 +241,15 @@ struct ContentView: View {
 protocol ReviewKeyboardResponder: AnyObject {}
 
 enum ReviewKeyboardNavigation {
+    @MainActor static func handleSelectAll(_ event: NSEvent, responder: NSResponder?, workspace: () -> Void) -> Bool {
+        guard event.type == .keyDown,
+              event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command,
+              event.charactersIgnoringModifiers?.lowercased() == "a" else { return false }
+        // SwiftUI's competing native/custom menu shortcuts can bypass the
+        // custom command. Route this window's event directly to its text editor.
+        EditingUndoRouter.selectAll(responder, workspace: workspace)
+        return true
+    }
     static func allows(_ responder: NSResponder?, mode: WorkspaceMode) -> Bool {
         guard !(responder is NSText), !(responder is NSControl) else { return false }
         return mode != .edit || responder is ReviewKeyboardResponder

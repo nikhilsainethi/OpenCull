@@ -1,3 +1,4 @@
+import AppKit
 import CullCore
 import Foundation
 import XCTest
@@ -65,7 +66,10 @@ final class IntegrationReviewerTests: XCTestCase {
     @MainActor func testSelectAllInComparisonNeverRatesPhotosOutsideVisibleComparison() async throws {
         let model = try await workspace()
         model.mode = .compare
-        model.selectAllVisible()
+        let commandA = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                                                     windowNumber: 0, context: nil, characters: "a", charactersIgnoringModifiers: "a",
+                                                     isARepeat: false, keyCode: 0))
+        XCTAssertTrue(ReviewKeyboardNavigation.handleSelectAll(commandA, responder: NSView(), workspace: model.selectAllVisible))
         let displayed = Set(model.comparisonItems.map(\.id))
         XCTAssertEqual(model.selection, displayed)
         model.setRating(5)
