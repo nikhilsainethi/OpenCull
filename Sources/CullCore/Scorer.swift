@@ -120,7 +120,12 @@ public enum Scorer {
 
         for (group, indices) in members {
             let isGroup = indices.count > 1
-            let maxSharpness = isGroup ? indices.compactMap { items[$0].analysis?.subjectSharpness }.max() : nil
+            // Incomplete/noisy measurements may be displayed for review, but must not
+            // become the reference that labels another, reliable frame as weak or blurry.
+            let reliable = indices.filter {
+                items[$0].analysisError == nil && items[$0].analysis?.analysisWarnings.isEmpty == true
+            }
+            let maxSharpness = isGroup ? reliable.compactMap { items[$0].analysis?.subjectSharpness }.max() : nil
 
             for i in indices {
                 guard let analysis = items[i].analysis else { continue }
@@ -133,14 +138,14 @@ public enum Scorer {
                 items[i].isBestInGroup = false
             }
 
-            let best = indices.max { (items[$0].score ?? 0) < (items[$1].score ?? 0) }
+            let best = reliable.max { (items[$0].score ?? 0) < (items[$1].score ?? 0) }
             if let best, isGroup { items[best].isBestInGroup = true }
 
             for i in indices {
                 let serious = items[i].issues.contains(.blurry) || items[i].issues.contains(.eyesClosed)
                     || (scoring.rejectExposureProblems && (items[i].issues.contains(.overexposed) || items[i].issues.contains(.underexposed)))
                 let warnings = items[i].analysis?.analysisWarnings ?? []
-                if !warnings.isEmpty {
+                if !warnings.isEmpty || items[i].analysisError != nil {
                     items[i].suggestion = .undecided
                 } else if serious {
                     items[i].suggestion = .reject
@@ -168,7 +173,7 @@ public enum Scorer {
         let capacity = max(0, count - explicitPicks)
         let eligible = items.indices.filter { i in
             guard let a = items[i].analysis else { return false }
-            return items[i].decision == .undecided && items[i].analysisError == nil && a.analysisWarnings.isEmpty
+            return items[i].decision == .undecided && !items[i].needsReview && items[i].analysisError == nil && a.analysisWarnings.isEmpty
                 && !items[i].issues.contains(.blurry) && !items[i].issues.contains(.eyesClosed)
                 && !items[i].issues.contains(.overexposed) && !items[i].issues.contains(.underexposed)
         }.sorted {
