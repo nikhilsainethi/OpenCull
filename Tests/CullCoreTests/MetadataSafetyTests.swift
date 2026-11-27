@@ -227,9 +227,10 @@ final class MetadataSafetyTests: XCTestCase {
         try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
         let url = store.directory.appendingPathComponent("decisions.json"), bytes = Data("{broken".utf8)
         try bytes.write(to: url)
-        XCTAssertThrowsError(try store.readDecisions())
+        var recovery: URL?
+        XCTAssertThrowsError(try store.readDecisions()) { recovery = ($0 as? SessionStore.ReadError)?.recoveryCopy }
         XCTAssertEqual(try Data(contentsOf: url), bytes)
-        XCTAssertEqual(try Data(contentsOf: url.appendingPathExtension("corrupt-backup")), bytes)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(recovery)), bytes)
     }
 
     func testEntryFingerprintRoundTripAndLegacyDecode() throws {

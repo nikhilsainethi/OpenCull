@@ -11,17 +11,19 @@ public enum Exporter {
     }
 
     private enum CopyError: Error, LocalizedError {
-        case invalidSource(String), invalidSidecar(String), unsafeDestination
+        case invalidSource(String), invalidSidecar(String), changedSource(String), unsafeDestination
         var errorDescription: String? {
             switch self {
             case .invalidSource(let name): return "Missing, symbolic-link or non-regular source: \(name)."
             case .invalidSidecar(let name): return "Could not safely update metadata in \(name)."
+            case .changedSource(let name): return "\(name) changed since it was reviewed. Reopen the album before exporting it."
             case .unsafeDestination: return "The destination must be a real directory different from the source."
             }
         }
     }
 
-    public static func copy(_ items: [PhotoItem], to destination: URL) -> CopyResult {
+    public static func copy(_ items: [PhotoItem], to destination: URL,
+                            validator: (@Sendable (PhotoItem) -> Bool)? = nil) -> CopyResult {
         let fm = FileManager.default
         var result = CopyResult()
         do {
@@ -36,6 +38,7 @@ public enum Exporter {
             let staging = destination.appendingPathComponent(".opencull-\(UUID().uuidString)", isDirectory: true)
             defer { try? fm.removeItem(at: staging) }
             do {
+                guard validator?(item) ?? true else { throw CopyError.changedSource(item.fileName) }
                 let sources = item.allFiles
                 for source in sources {
                     guard try fm.attributesOfItem(atPath: source.path)[.type] as? FileAttributeType == .typeRegular else { throw CopyError.invalidSource(source.lastPathComponent) }
@@ -76,6 +79,7 @@ public enum Exporter {
                     }
                 }
                 if let sidecarText { try sidecarText.write(to: staging.appendingPathComponent(sidecar.lastPathComponent), atomically: true, encoding: .utf8) }
+                guard validator?(item) ?? true else { throw CopyError.changedSource(item.fileName) }
                 // Exclusive moves fail instead of overwriting a concurrent destination creation.
                 for name in names {
                     let target = destination.appendingPathComponent(name)
@@ -192,9 +196,14 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     private func recoveryError(for source: URL, error: Error) -> ReadError {
-        let backup = source.appendingPathExtension("corrupt-backup")
+        // Every failed read describes this version of the damaged source. An older
+        // recovery file is not a backup of later corrupt choices or analysis.
+        let backup = source.appendingPathExtension("corrupt-\(UUID().uuidString)")
         let fm = FileManager.default
-        if !fm.fileExists(atPath: backup.path), (try? fm.attributesOfItem(atPath: source.path)[.type]) as? FileAttributeType == .typeRegular { try? fm.copyItem(at: source, to: backup) }
-        return ReadError(source: source, recoveryCopy: fm.fileExists(atPath: backup.path) ? backup : nil, detail: error.localizedDescription)
+        var recovery: URL?
+        if (try? fm.attributesOfItem(atPath: source.path)[.type]) as? FileAttributeType == .typeRegular {
+            do { try fm.copyItem(at: source, to: backup); recovery = backup } catch { }
+        }
+        return ReadError(source: source, recoveryCopy: recovery, detail: error.localizedDescription)
     }
 }
