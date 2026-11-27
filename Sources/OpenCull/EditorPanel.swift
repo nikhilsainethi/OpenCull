@@ -192,7 +192,7 @@ struct EditorPanel: View {
                 Button { rotate(90) } label: { Image(systemName: "rotate.right") }.help("Rotate 90° right")
                 Spacer()
                 Menu("Aspect") {
-                    Button("Original") { var recipe = model.selectedRecipe; recipe.crop = nil; model.setRecipe(recipe, name: "Remove crop") }
+                    Button("Original") { aspectRequest = UUID(); var recipe = model.selectedRecipe; recipe.crop = nil; model.setRecipe(recipe, name: "Remove crop") }
                     Button("1:1 Square") { cropToAspect(1) }
                     Button("3:2 Photo") { cropToAspect(1.5) }
                     Button("4:3") { cropToAspect(4.0/3) }

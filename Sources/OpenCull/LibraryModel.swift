@@ -464,13 +464,14 @@ final class LibraryModel {
     // MARK: Editing
     func setRecipe(_ recipe: EditRecipe, name: String = "Edit photo", coalescing: String? = nil) {
         guard let item = selectedItem else { return }
+        // Even a no-op Reset/Original is a new intent that cancels older async adjustments.
+        editRevision &+= 1
         let edit = recipe.clamped()
         guard self.recipe(for: item) != edit else { return }
         let key = coalescing.map { item.id + "#" + $0 }
         if key == nil || key != lastEditKey || Date().timeIntervalSince(lastEditDate) > 0.8 { remember(name) }
         lastEditKey = key; lastEditDate = Date()
         records[item.id]?.recipe = edit; showOriginal = false; reconcileSelection(); scheduleSave()
-        editRevision &+= 1
     }
     func applyPreset(_ preset: EditingPreset) { setRecipe(preset.recipe, name: "Apply \(preset.title)") }
     func applyStyle(_ style: SavedStyle) {
@@ -533,10 +534,10 @@ final class LibraryModel {
     }
     func autoAdjust() {
         guard let item = selectedItem else { return }
-        let id = item.id, token = generation, originalRecipe = recipe(for: item)
+        let id = item.id, token = generation, originalRecipe = recipe(for: item), revision = editRevision
         Task {
             let image = await PreviewCache.shared.image(for: item, size: 1600)
-            guard generation == token, selectedID == id, recipe(for: item) == originalRecipe, let image else { return }
+            guard generation == token, editRevision == revision, selectedID == id, recipe(for: item) == originalRecipe, let image else { return }
             let tone = PhotoEditor.autoAdjust(image: image)
             var merged = originalRecipe
             merged.exposure = tone.exposure; merged.highlights = tone.highlights; merged.shadows = tone.shadows

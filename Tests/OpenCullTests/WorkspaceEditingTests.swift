@@ -288,4 +288,15 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
         XCTAssertEqual(try Data(contentsOf: original.url), bytes)
     }
+
+    @MainActor func testOriginalIntentCancelsPendingEditRevisionWithoutAddingUndo() throws {
+        let (model, _, _, _) = try workspace()
+        let revision = model.editRevision
+        XCTAssertEqual(model.selectedRecipe, .identity)
+        model.setRecipe(.identity, name: "Remove crop")
+        XCTAssertGreaterThan(model.editRevision, revision)
+        XCTAssertEqual(model.selectedRecipe, .identity)
+        XCTAssertFalse(model.canUndo)
+        _ = model.flushPendingSaves()
+    }
 }
