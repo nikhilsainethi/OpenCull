@@ -38,7 +38,11 @@ public struct PhotoAnalyzer: Sendable {
         }
         guard let image, let gray = GrayImage(cgImage: image) else { throw AnalysisError.cannotDecode(url) }
         let metadata = ImageLoader.metadata(url: url) ?? ImageLoader.metadata(url: source)
-        return analyze(image: image, gray: gray, metadata: metadata)
+        var analysis = analyze(image: image, gray: gray, metadata: metadata)
+        if ImageLoader.isRaw(url), !ImageLoader.supportsFullRawDecoding(url: url) {
+            analysis.analysisWarnings.insert("Full-resolution RAW decoding is unavailable for this camera on this Mac. Analysis uses a preview or companion image; inspect it manually. Native RAW editing is unavailable.", at: 0)
+        }
+        return analysis
     }
 
     /// Analyzes an already decoded, upright image.

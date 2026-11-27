@@ -153,7 +153,10 @@ public enum PhotoEditor {
         let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any] ?? [:]
         if let width = properties[kCGImagePropertyPixelWidth] as? Int,
            let height = properties[kCGImagePropertyPixelHeight] as? Int { try validate(width: width, height: height) }
-        if ImageLoader.isRaw(url), let raw = CIRAWFilter(imageURL: url) {
+        if ImageLoader.isRaw(url) {
+            guard let raw = CIRAWFilter(imageURL: url), ImageLoader.hasFullRawDecoder(raw) else {
+                throw EditingError.cannotDecode(url.lastPathComponent)
+            }
             try validate(width: Int(raw.nativeSize.width), height: Int(raw.nativeSize.height))
             raw.isDraftModeEnabled = false
             raw.scaleFactor = 1
