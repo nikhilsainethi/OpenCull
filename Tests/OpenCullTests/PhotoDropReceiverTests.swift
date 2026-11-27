@@ -2,7 +2,33 @@ import AppKit
 import XCTest
 @testable import OpenCull
 
+private final class SlowDropCleanupProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entered = 0, completed = 0
+    private var outsideMain = true, outsideTask = true
+    let release = DispatchSemaphore(value: 0)
+    func remove(_ directory: URL) {
+        let hasTask = withUnsafeCurrentTask { $0 != nil }
+        lock.lock(); entered += 1
+        outsideMain = outsideMain && !Thread.isMainThread; outsideTask = outsideTask && !hasTask
+        lock.unlock()
+        _ = release.wait(timeout: .now() + 2)
+        try? FileManager.default.removeItem(at: directory)
+        lock.lock(); completed += 1; lock.unlock()
+    }
+    var state: (entered: Int, completed: Int, outsideMain: Bool, outsideTask: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        return (entered, completed, outsideMain, outsideTask)
+    }
+    func releaseAll() { for _ in 0..<5 { release.signal() } }
+}
+
 final class PhotoDropReceiverTests: XCTestCase {
+    @MainActor private func until(_ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(2)
+        while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(3)) }
+        XCTAssertTrue(condition())
+    }
     func testPromiseRepresentationTakesPriorityOverBrowserURL() {
         XCTAssertEqual(PhotoDropPolicy.classify(hasPromises: true, localURLs: [], hasRemoteRepresentation: true), .promises)
     }
@@ -97,7 +123,7 @@ final class PhotoDropReceiverTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
     }
 
-    @MainActor func testCancellationIDReleasesOnlyItsReceiptAndIgnoresQueuedOldCompletion() throws {
+    @MainActor func testCancellationIDReleasesOnlyItsReceiptAndIgnoresQueuedOldCompletion() async throws {
         let surface = PhotoDropDestinationView()
         var requested: [UUID] = [], ended: [UUID] = [], delivered: [PhotoDropPayload] = []
         var failures: [String] = []
@@ -111,7 +137,7 @@ final class PhotoDropReceiverTests: XCTestCase {
         let queuedResult = try XCTUnwrap(first.accept(directoryA.appendingPathComponent("first.jpg"), error: nil))
         surface.cancellationID = UUID()
         XCTAssertEqual(ended, [requested[0]])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: directoryA.path))
+        try await until { !FileManager.default.fileExists(atPath: directoryA.path) }
         let directoryB = FileManager.default.temporaryDirectory.appendingPathComponent("OpenCull-receipt-b-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: directoryB) }
         let second = try XCTUnwrap(surface.beginReceiving(in: directoryB))
@@ -128,7 +154,7 @@ final class PhotoDropReceiverTests: XCTestCase {
         XCTAssertTrue(failures.isEmpty, "User cancellation is silent")
     }
 
-    @MainActor func testPromiseFailureReleasesReceiptAndCleansOwnedFolderOnce() throws {
+    @MainActor func testPromiseFailureReleasesReceiptAndCleansOwnedFolderOnce() async throws {
         let surface = PhotoDropDestinationView()
         var requested: UUID?, ended: [UUID] = [], failures: [String] = []
         surface.onReceiving = { requested = $0; return true }
@@ -141,10 +167,10 @@ final class PhotoDropReceiverTests: XCTestCase {
         surface.finish(error, for: batch)
         XCTAssertEqual(ended, [try XCTUnwrap(requested)])
         XCTAssertEqual(failures, ["Source cancelled delivery"])
-        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
+        try await until { !FileManager.default.fileExists(atPath: directory.path) }
     }
 
-    @MainActor func testCancelledProviderLateOutputIsCleanedWithoutTouchingNewReceipt() throws {
+    @MainActor func testCancelledProviderLateOutputIsCleanedWithoutTouchingNewReceipt() async throws {
         let manager = FileManager.default
         let surface = PhotoDropDestinationView()
         let oldDirectory = manager.temporaryDirectory.appendingPathComponent("OpenCull-late-old-\(UUID().uuidString)")
@@ -153,6 +179,7 @@ final class PhotoDropReceiverTests: XCTestCase {
         let oldBatch = try XCTUnwrap(surface.beginReceiving(in: oldDirectory))
         XCTAssertNil(oldBatch.seal(expectedCount: 2))
         surface.cancelPendingDrop()
+        try await until { !manager.fileExists(atPath: oldDirectory.path) }
         let newBatch = try XCTUnwrap(surface.beginReceiving(in: newDirectory))
         _ = newBatch // Keep the new receipt pending during late delivery.
         try manager.createDirectory(at: oldDirectory, withIntermediateDirectories: true)
@@ -162,6 +189,7 @@ final class PhotoDropReceiverTests: XCTestCase {
         XCTAssertFalse(manager.fileExists(atPath: oldDirectory.path), "Cancelled providers can finish writing after cancellation")
         XCTAssertTrue(manager.fileExists(atPath: newDirectory.path))
         surface.cancelPendingDrop()
+        try await until { !manager.fileExists(atPath: newDirectory.path) }
     }
 
     func testFailedProviderLateOutputIsCleanedButSuccessfulPayloadKeepsCallerOwnership() throws {
@@ -182,6 +210,41 @@ final class PhotoDropReceiverTests: XCTestCase {
         XCTAssertNil(successful.accept(file, error: nil))
         XCTAssertTrue(manager.fileExists(atPath: file.path), "Success transfers cleanup ownership to the importer")
         (try result.get()).cleanup()
+    }
+
+    @MainActor func testSlowOwnedCleanupReleasesReceiptWithoutBlockingUIOrSwiftWorkers() async throws {
+        let probe = SlowDropCleanupProbe()
+        defer { probe.releaseAll() }
+        let surface = PhotoDropDestinationView()
+        surface.cleanupScheduler = PhotoDropCleanup(remove: { probe.remove($0) })
+        var ended: [UUID] = []
+        surface.onReceiptEnded = { ended.append($0) }
+        let old = FileManager.default.temporaryDirectory.appendingPathComponent("OpenCull-cleanup-old-\(UUID().uuidString)")
+        let next = FileManager.default.temporaryDirectory.appendingPathComponent("OpenCull-cleanup-next-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: old); try? FileManager.default.removeItem(at: next) }
+        let first = try XCTUnwrap(surface.beginReceiving(in: old))
+        XCTAssertNil(first.seal(expectedCount: 1))
+        let queuedSuccess = try XCTUnwrap(first.accept(old.appendingPathComponent("photo.jpg"), error: nil))
+        let start = Date()
+        surface.cancelPendingDrop()
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1, "Cancelling a large promise must not delete its tree on the UI actor")
+        XCTAssertEqual(ended.count, 1, "Receipt release precedes slow filesystem cleanup")
+        let second = try XCTUnwrap(surface.beginReceiving(in: next))
+        surface.finish(queuedSuccess, for: first)
+        XCTAssertEqual(ended.count, 1, "Stale cleanup cannot release the new receipt")
+        try await until { probe.state.entered >= 1 }
+        XCTAssertTrue(probe.state.outsideMain)
+        XCTAssertTrue(probe.state.outsideTask)
+        let responsive = await Task.detached { 42 }.value
+        XCTAssertEqual(responsive, 42)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: next.path))
+        probe.releaseAll()
+        try await until { probe.state.completed == 2 }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: old.path))
+        surface.cancelPendingDrop()
+        try await until { !FileManager.default.fileExists(atPath: next.path) }
+        XCTAssertEqual(ended.count, 2)
+        _ = second
     }
 
     @MainActor func testDropSurfacePassesNormalClicksToUnderlyingContent() {

@@ -33,7 +33,9 @@ final class NativeInteractionRoutingTests: XCTestCase {
     @MainActor func testAvailableNativeTextUndoStillTakesPriority() {
         let text = TextUndoTestView()
         text.testUndoManager.registerUndo(withTarget: text) { target in
-            target.testUndoManager.registerUndo(withTarget: target) { _ in }
+            MainActor.assumeIsolated {
+                target.testUndoManager.registerUndo(withTarget: target) { _ in }
+            }
         }
         XCTAssertTrue(EditingUndoRouter.textManager(text) === text.testUndoManager)
         text.testUndoManager.undo()

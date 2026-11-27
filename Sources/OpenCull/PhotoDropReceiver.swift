@@ -21,6 +21,21 @@ struct PhotoDropPayload: Sendable {
     }
 }
 
+/// Shared deletion boundary for potentially large owned promise directories.
+final class PhotoDropCleanup: @unchecked Sendable {
+    static let shared = PhotoDropCleanup()
+    private let remove: @Sendable (URL) -> Void
+    private let queue = DispatchQueue(label: "OpenCull owned drop cleanup", qos: .utility)
+
+    init(remove: @escaping @Sendable (URL) -> Void = { try? FileManager.default.removeItem(at: $0) }) {
+        self.remove = remove
+    }
+
+    func schedule(_ ownedDirectory: URL) {
+        queue.async { [remove] in remove(ownedDirectory) }
+    }
+}
+
 enum PhotoDropClassification: Equatable {
     case promises
     case files([URL])
@@ -78,14 +93,17 @@ final class PhotoPromiseBatch: @unchecked Sendable {
     }
 
     func accept(_ url: URL, error: Error?) -> Result<PhotoDropPayload, PhotoDropError>? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         guard !finished else {
+            let needsCleanup = abandoned
+            lock.unlock()
             // A cancelled/failed source may finish writing after the first cleanup.
             // Its callback only owns this batch's destination, never the supplied URL.
             // Successful payloads retain caller ownership until copying completes.
-            if abandoned { try? FileManager.default.removeItem(at: directory) }
+            if needsCleanup { try? FileManager.default.removeItem(at: directory) }
             return nil
         }
+        defer { lock.unlock() }
         if let error { return failLocked("The photo source could not provide the dropped files: \(error.localizedDescription)") }
         let path = url.standardizedFileURL.path
         let resolvedPath = url.resolvingSymlinksInPath().standardizedFileURL.path
@@ -189,6 +207,7 @@ extension View {
 }
 
 @MainActor final class PhotoDropDestinationView: NSView {
+    var cleanupScheduler = PhotoDropCleanup.shared
     var isEnabled = true
     var cancellationID = UUID(uuidString: "00000000-0000-0000-0000-000000000000")! {
         didSet { if cancellationID != oldValue { cancelPendingDrop() } }
@@ -336,7 +355,7 @@ extension View {
 
     func finish(_ result: Result<PhotoDropPayload, PhotoDropError>, for batch: PhotoPromiseBatch, reportFailure: Bool = true) {
         guard promiseBatch === batch else {
-            if case .success(let payload) = result { payload.cleanup() }
+            if case .success(let payload) = result, let directory = payload.ownedTemporaryDirectory { cleanupScheduler.schedule(directory) }
             return
         }
         let directory = promiseDirectory, receiptID = activeReceiptID
@@ -346,7 +365,7 @@ extension View {
         switch result {
         case .success(let payload): onFiles(payload)
         case .failure(let error):
-            if let directory { try? FileManager.default.removeItem(at: directory) }
+            if let directory { cleanupScheduler.schedule(directory) }
             if let receiptID { onReceiptEnded(receiptID) }
             if reportFailure { onFailure(error.localizedDescription) }
         }
