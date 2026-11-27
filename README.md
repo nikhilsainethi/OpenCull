@@ -119,7 +119,15 @@ Core Image pipeline:
 learn a style. Presets include Original, Natural, Vivid, Soft Portrait, Landscape
 and Black & White. Save reusable local styles from current adjustments. Styles
 and batch application include crop/rotation, so review compositions across frames.
-A saved style is a recipe, not a trained AI editing-profile service.
+A fixed saved style repeats a recipe. **Learn Adaptive Profile…** instead trains
+a small local ridge-regression model from at least six selected, explicitly edited
+photos with varied brightness. It relates brightness, clipping, face context and
+aesthetics to your light/color/detail adjustments, then predicts a separate recipe
+for each photograph. Adaptive application preserves each photo's crop/rotation.
+It stores coefficients, not image pixels, and needs no pretrained model download.
+This is a lightweight statistical baseline: a few example edits do not establish
+professional accuracy or Aftershoot-equivalent style matching. Far outside the
+training conditions, predictions shrink toward the profile's average adjustments.
 
 **Apply to Selected Photos** or **Apply to All Picks** propagates the current
 recipe as one undoable batch operation.
@@ -176,7 +184,8 @@ Optional **Personal ranking** learns from explicit local picks, rejects and star
 It stays neutral until 12 examples include at least four picks and four rejects.
 A bounded feature-centroid model then adjusts ranking by at most ten points;
 technical safeguards still apply. Reset it in Settings. It does not infer artistic
-intent, identify important people, or generate edits from a trained style.
+intent or identify important people. Personal ranking affects culling; adaptive
+editing profiles are trained separately from edited examples as described above.
 
 ## Culling behavior and limits
 

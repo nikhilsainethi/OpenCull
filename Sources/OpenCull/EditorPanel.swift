@@ -8,6 +8,7 @@ struct EditorPanel: View {
     @State private var histogram: ImageHistogram?
     @State private var histogramKey: String?
     @State private var showingSaveStyle = false
+    @State private var learningAdaptiveStyle = false
     @State private var styleName = ""
     @State private var toneExpanded = true
     @State private var colorExpanded = true
@@ -57,11 +58,18 @@ struct EditorPanel: View {
             } else { histogram = nil }
             histogramKey = key
         }
-        .alert("Save local style", isPresented: $showingSaveStyle) {
+        .alert(learningAdaptiveStyle ? "Learn local editing profile" : "Save local style", isPresented: $showingSaveStyle) {
             TextField("Style name", text: $styleName)
-            Button("Save") { model.saveStyle(name: styleName) }.disabled(styleName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button(learningAdaptiveStyle ? "Learn Profile" : "Save") {
+                if learningAdaptiveStyle { model.saveAdaptiveStyle(name: styleName) }
+                else { model.saveStyle(name: styleName) }
+            }.disabled(styleName.trimmingCharacters(in: .whitespaces).isEmpty)
             Button("Cancel", role: .cancel) {}
-        } message: { Text("Save the current adjustments as a reusable style on this Mac.") }
+        } message: {
+            Text(learningAdaptiveStyle
+                 ? "Learn how your light, color and detail adjustments vary across \(model.adaptiveExampleCount) selected edited photos. Everything stays on this Mac. Crop and rotation are excluded."
+                 : "Save the current adjustments as a reusable fixed recipe on this Mac.")
+        }
     }
 
     private var title: some View {
@@ -109,43 +117,56 @@ struct EditorPanel: View {
                 Menu("Saved Styles") {
                     if model.styles.isEmpty { Text("No saved styles yet") }
                     ForEach(model.styles) { style in
-                        Menu(style.name) {
-                            Button("Apply") { model.applyStyle(style) }
+                        Menu(style.profile.map { "\(style.name) · Adaptive (\($0.sampleCount))" } ?? style.name) {
+                            Button("Apply to This Photo") { model.applyStyle(style) }
+                            if style.profile != nil {
+                                Button("Apply Individually to Selected") { model.applyAdaptiveStyle(style) }
+                                    .disabled(model.selectedItems.isEmpty)
+                                Button("Apply Individually to All Picks") { model.applyAdaptiveStyle(style, allPicks: true) }
+                                    .disabled(model.counts.picks == 0)
+                                Text("Lightweight local profile · composition preserved")
+                            }
                             Button("Delete Style", role: .destructive) { model.deleteStyle(style.id) }
                         }
                     }
                 }
             }
-            Button { styleName = ""; showingSaveStyle = true } label: { Label("Save Current Style…", systemImage: "plus.circle") }
+            Button { styleName = ""; learningAdaptiveStyle = false; showingSaveStyle = true } label: { Label("Save Fixed Style…", systemImage: "plus.circle") }
                 .buttonStyle(.link).font(.caption)
+            Button { styleName = ""; learningAdaptiveStyle = true; showingSaveStyle = true } label: {
+                Label("Learn Adaptive Profile…", systemImage: "sparkles")
+            }.buttonStyle(.link).font(.caption)
+                .disabled(model.adaptiveExampleCount < AdaptiveStyleProfile.minimumExamples)
+            Text("Profiles need six or more edited photos with varied brightness; \(model.adaptiveExampleCount) selected.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
     private var toneControls: some View {
         VStack(spacing: 12) {
-            adjustment("Exposure", key: \.exposure, range: -5...5, step: 0.05, suffix: "EV")
-            adjustment("Contrast", key: \.contrast, range: 0.5...2, step: 0.02)
-            adjustment("Highlights", key: \.highlights, range: 0...1, step: 0.01)
-            adjustment("Shadows", key: \.shadows, range: 0...1, step: 0.01)
+            adjustment("Exposure", key: \.exposure, range: -5...5, suffix: "EV")
+            adjustment("Contrast", key: \.contrast, range: 0.5...2)
+            adjustment("Highlights", key: \.highlights, range: 0...1)
+            adjustment("Shadows", key: \.shadows, range: 0...1)
         }
     }
     private var colorControls: some View {
         VStack(spacing: 12) {
-            adjustment("Temperature", key: \.temperature, range: 2000...12000, step: 100, decimals: 0, suffix: "K")
-            adjustment("Tint", key: \.tint, range: -150...150, step: 1, decimals: 0)
-            adjustment("Saturation", key: \.saturation, range: 0...2, step: 0.02)
-            adjustment("Vibrance", key: \.vibrance, range: -1...1, step: 0.02)
+            adjustment("Temperature", key: \.temperature, range: 2000...12000, decimals: 0, suffix: "K")
+            adjustment("Tint", key: \.tint, range: -150...150, decimals: 0)
+            adjustment("Saturation", key: \.saturation, range: 0...2)
+            adjustment("Vibrance", key: \.vibrance, range: -1...1)
         }
     }
     private var detailControls: some View {
         VStack(spacing: 12) {
-            adjustment("Sharpness", key: \.sharpness, range: 0...2, step: 0.05)
-            adjustment("Noise Reduction", key: \.noiseReduction, range: 0...1, step: 0.02)
+            adjustment("Sharpness", key: \.sharpness, range: 0...2)
+            adjustment("Noise Reduction", key: \.noiseReduction, range: 0...1)
         }
     }
 
     private func adjustment(_ title: String, key: WritableKeyPath<EditRecipe, Double>, range: ClosedRange<Double>,
-                            step: Double, decimals: Int = 2, suffix: String = "") -> some View {
+                            decimals: Int = 2, suffix: String = "") -> some View {
         let value = Binding<Double>(get: { model.selectedRecipe[keyPath: key] }, set: { new in
             var recipe = model.selectedRecipe; recipe[keyPath: key] = new
             model.setRecipe(recipe, name: "Adjust \(title)", coalescing: title)
@@ -159,7 +180,7 @@ struct EditorPanel: View {
                     .font(.caption.monospacedDigit())
                 if !suffix.isEmpty { Text(suffix).font(.caption2).foregroundStyle(.secondary) }
             }
-            Slider(value: value, in: range, step: step).accessibilityLabel(title)
+            Slider(value: value, in: range).accessibilityLabel(title)
         }
     }
 
@@ -179,7 +200,7 @@ struct EditorPanel: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 HStack { Text("Straighten"); Spacer(); Text(straighten.wrappedValue, format: .number.precision(.fractionLength(1))).monospacedDigit(); Text("°") }.font(.caption)
-                Slider(value: straighten, in: -45...45, step: 0.1).accessibilityLabel("Straighten")
+                Slider(value: straighten, in: -45...45).accessibilityLabel("Straighten")
             }
             Toggle("Crop", isOn: Binding(get: { model.selectedRecipe.crop != nil }, set: { enabled in
                 var recipe = model.selectedRecipe
@@ -240,7 +261,7 @@ struct EditorPanel: View {
         })
         return VStack(alignment: .leading, spacing: 3) {
             HStack { Text(title); Spacer(); Text(binding.wrappedValue, format: .percent.precision(.fractionLength(0))).monospacedDigit() }.font(.caption)
-            Slider(value: binding, in: range, step: 0.01).accessibilityLabel("Crop \(title)")
+            Slider(value: binding, in: range).accessibilityLabel("Crop \(title)")
         }
     }
     private func cropToAspect(_ ratio: Double) {
