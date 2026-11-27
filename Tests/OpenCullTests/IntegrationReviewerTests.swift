@@ -5,7 +5,7 @@ import XCTest
 
 /// Review regressions use a completely isolated workspace and UserDefaults suite.
 final class IntegrationReviewerTests: XCTestCase {
-    @MainActor private func workspace(count: Int = 5) throws -> LibraryModel {
+    @MainActor private func workspace(count: Int = 5) async throws -> LibraryModel {
         let fm = FileManager.default
         let root = fm.temporaryDirectory.appendingPathComponent("OpenCull-Reviewer-\(UUID().uuidString)")
         let photos = root.appendingPathComponent("Photos"), data = root.appendingPathComponent("Data")
@@ -24,7 +24,7 @@ final class IntegrationReviewerTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let model = LibraryModel(appDataDirectory: data, defaults: defaults)
         model.autoAdvance = false
-        model.open(photos)
+        await model.open(photos)
         XCTAssertFalse(model.isAnalyzing)
         addTeardownBlock {
             UserDefaults.standard.removePersistentDomain(forName: suite)
@@ -33,8 +33,8 @@ final class IntegrationReviewerTests: XCTestCase {
         return model
     }
 
-    @MainActor func testFilteringKeepsActivePhotoInsideSurvivingBatchSelection() throws {
-        let model = try workspace(count: 3)
+    @MainActor func testFilteringKeepsActivePhotoInsideSurvivingBatchSelection() async throws {
+        let model = try await workspace(count: 3)
         let first = model.items[0].id, survivor = model.items[1].id, hidden = model.items[2].id
         model.select(survivor)
         model.select(hidden, extending: true)
@@ -49,8 +49,8 @@ final class IntegrationReviewerTests: XCTestCase {
         XCTAssertTrue(model.flushPendingSaves())
     }
 
-    @MainActor func testComparisonTruncationKeepsActivePhotoInsideComparisonSelection() throws {
-        let model = try workspace()
+    @MainActor func testComparisonTruncationKeepsActivePhotoInsideComparisonSelection() async throws {
+        let model = try await workspace()
         model.selectAllVisible()
         model.select(model.items[4].id, extending: true) // toggles off; put it back as the active member
         model.select(model.items[4].id, extending: true)
@@ -59,6 +59,17 @@ final class IntegrationReviewerTests: XCTestCase {
         XCTAssertEqual(model.comparisonItems.count, 4)
         XCTAssertTrue(model.selection.contains(try XCTUnwrap(model.selectedID)))
         XCTAssertTrue(model.comparisonItems.contains { $0.id == model.selectedID })
+        XCTAssertTrue(model.flushPendingSaves())
+    }
+
+    @MainActor func testSelectAllInComparisonNeverRatesPhotosOutsideVisibleComparison() async throws {
+        let model = try await workspace()
+        model.mode = .compare
+        model.selectAllVisible()
+        let displayed = Set(model.comparisonItems.map(\.id))
+        XCTAssertEqual(model.selection, displayed)
+        model.setRating(5)
+        XCTAssertTrue(model.items.filter { !displayed.contains($0.id) }.allSatisfy { $0.rating == 0 })
         XCTAssertTrue(model.flushPendingSaves())
     }
 }

@@ -24,10 +24,10 @@ final class LibraryWorkflowTests: XCTestCase {
         return (folder, store)
     }
 
-    @MainActor func testFilterAlwaysSelectsAVisiblePhoto() throws {
+    @MainActor func testFilterAlwaysSelectsAVisiblePhoto() async throws {
         let (folder, _) = try fixture()
         let model = LibraryModel()
-        model.open(folder)
+        await model.open(folder)
         model.selectedID = model.items[0].id
         model.setDecision(.pick)
         model.selectedID = model.items[1].id
@@ -38,10 +38,10 @@ final class LibraryWorkflowTests: XCTestCase {
         XCTAssertEqual(model.selectedItem?.decision, .pick)
     }
 
-    @MainActor func testLogicalGroupNavigationAdvancesAcrossSingletons() throws {
+    @MainActor func testLogicalGroupNavigationAdvancesAcrossSingletons() async throws {
         let (folder, _) = try fixture()
         let model = LibraryModel()
-        model.open(folder)
+        await model.open(folder)
         model.selectNextSection()
         XCTAssertEqual(model.selectedID, model.items[1].id)
         model.showGroups = false
@@ -51,22 +51,22 @@ final class LibraryWorkflowTests: XCTestCase {
         XCTAssertEqual(model.selectedID, model.items[1].id)
     }
 
-    @MainActor func testAcceptSuggestionsCannotCommitPartialAnalysis() throws {
+    @MainActor func testAcceptSuggestionsCannotCommitPartialAnalysis() async throws {
         let (folder, _) = try fixture(cached: 1)
         let model = LibraryModel()
-        model.open(folder)
+        await model.open(folder)
         XCTAssertTrue(model.isAnalyzing)
         model.acceptSuggestions()
         XCTAssertEqual(model.counts.picks, 0)
         XCTAssertEqual(model.counts.rejects, 0)
     }
 
-    @MainActor func testFailedOpenPreservesCurrentAnalysis() throws {
+    @MainActor func testFailedOpenPreservesCurrentAnalysis() async throws {
         let (folder, _) = try fixture(cached: 0)
         let model = LibraryModel()
-        model.open(folder)
+        await model.open(folder)
         XCTAssertTrue(model.isAnalyzing)
-        model.open(folder.appendingPathComponent("missing"))
+        await model.open(folder.appendingPathComponent("missing"))
         XCTAssertTrue(model.isAnalyzing)
         XCTAssertEqual(model.folder, folder)
     }

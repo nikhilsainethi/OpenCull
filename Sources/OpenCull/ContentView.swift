@@ -44,6 +44,17 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1080, minHeight: 680)
+        .disabled(model.isOpening)
+        .overlay {
+            if model.isOpening {
+                VStack(spacing: 12) {
+                    ProgressView("Opening photo folder…")
+                    Text("Reading files and saved choices. You can cancel without changing the current album.")
+                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    Button("Cancel opening", action: model.cancelOpening)
+                }.padding(24).frame(width: 340).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+        }
         .background(WindowReader { model.window = $0 })
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -57,9 +68,9 @@ struct ContentView: View {
                         }
                     }
                 } label: { Label("Albums", systemImage: "folder") }
-                .disabled(model.isExporting || model.isImporting)
+                .disabled(model.isExporting || model.isImporting || model.isOpening)
             }
-            ToolbarItem { PhotosPicker(selection: $photoSelection, matching: .images) { Label("Photos", systemImage: "photo.on.rectangle") }.disabled(importingPhotos || model.isExporting) }
+            ToolbarItem { PhotosPicker(selection: $photoSelection, matching: .images) { Label("Photos", systemImage: "photo.on.rectangle") }.disabled(importingPhotos || model.isExporting || model.isOpening) }
             ToolbarItem(placement: .principal) {
                 Picker("Workspace", selection: $model.mode) {
                     ForEach(WorkspaceMode.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
@@ -67,19 +78,21 @@ struct ContentView: View {
             }
             ToolbarItem {
                 Button { model.acceptSuggestions() } label: { Label("Accept", systemImage: "wand.and.stars") }
-                    .disabled(model.folder == nil || model.isAnalyzing || model.isExporting)
+                    .disabled(model.folder == nil || model.isAnalyzing || model.isExporting || model.isOpening)
                     .help("Apply completed suggestions; uncertain photos stay undecided. Undo is available.")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { exportSheet = true } label: { Label("Export…", systemImage: "square.and.arrow.up") }
-                    .disabled(model.folder == nil || model.isExporting || model.isImporting)
+                    .disabled(model.folder == nil || model.isExporting || model.isImporting || model.isOpening)
             }
         }
         .sheet(isPresented: $exportSheet) { ExportSheet() }
         .alert(item: $model.alert) { Alert(title: Text($0.title), message: Text($0.message)) }
         .dropDestination(for: URL.self) { urls, _ in
-            guard let url = urls.first, (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true else { return false }
-            model.open(url); return true
+            guard let url = urls.first else { return false }
+            // Directory validation belongs to the detached loader too: even a
+            // resource-value lookup can wait on a cloud provider or permission.
+            Task { await model.open(url) }; return true
         }
         .onChange(of: photoSelection) { _, selection in
             guard !selection.isEmpty else { return }
@@ -95,9 +108,9 @@ struct ContentView: View {
                         try await Task.detached(priority: .userInitiated) { try LibraryModel.storeImportedImage(data, index: index, in: destination) }.value
                         imported += 1
                     }
-                    model.finishPhotosImport(destination)
+                    await model.finishPhotosImport(destination)
                 } catch {
-                    model.finishPhotosImport(imported > 0 ? album : nil)
+                    await model.finishPhotosImport(imported > 0 ? album : nil)
                     model.alert = AlertMessage(title: "Photos import needs attention", message: "Imported \(imported) of \(selection.count) chosen photos. " + error.localizedDescription)
                 }
                 importingPhotos = false; photoSelection = []
@@ -106,9 +119,11 @@ struct ContentView: View {
         .onAppear {
             keyMonitor.start(handleKey)
             let arguments = CommandLine.arguments
-            if let index = arguments.firstIndex(of: "--open"), index + 1 < arguments.count { model.open(URL(fileURLWithPath: arguments[index + 1])) }
+            if let index = arguments.firstIndex(of: "--open"), index + 1 < arguments.count {
+                Task { await model.open(URL(fileURLWithPath: arguments[index + 1])) }
+            }
         }
-        .onDisappear { keyMonitor.stop(); _ = model.flushPendingSaves() }
+        .onDisappear { keyMonitor.stop(); model.cancelOpening(); _ = model.flushPendingSaves() }
     }
 
     private var albumBar: some View {
@@ -154,7 +169,8 @@ struct ContentView: View {
 
     private var statusBar: some View {
         HStack(spacing: 12) {
-            if model.isAnalyzing {
+            if model.isOpening { ProgressView().controlSize(.small); Text("Opening photo folder…") }
+            else if model.isAnalyzing {
                 ProgressView(value: Double(model.analyzedCount), total: Double(max(1, model.items.count))).frame(width: 100)
                 Text("Analyzing \(model.analyzedCount) / \(model.items.count)")
             } else if model.isExporting { ProgressView().controlSize(.small); Text(model.exportProgress) }
@@ -195,9 +211,9 @@ struct ContentView: View {
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
-        guard model.folder != nil, event.window === model.window,
+        guard model.folder != nil, !model.isOpening, event.window === model.window,
               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-              !(event.window?.firstResponder is NSText) else { return false }
+              ReviewKeyboardNavigation.allows(event.window?.firstResponder, mode: model.mode) else { return false }
         switch event.keyCode {
         case 123: model.selectPrevious(); return true
         case 124: model.selectNext(); return true
@@ -218,6 +234,15 @@ struct ContentView: View {
         default: return false
         }
         return true
+    }
+}
+
+protocol ReviewKeyboardResponder: AnyObject {}
+
+enum ReviewKeyboardNavigation {
+    static func allows(_ responder: NSResponder?, mode: WorkspaceMode) -> Bool {
+        guard !(responder is NSText), !(responder is NSControl) else { return false }
+        return mode != .edit || responder is ReviewKeyboardResponder
     }
 }
 

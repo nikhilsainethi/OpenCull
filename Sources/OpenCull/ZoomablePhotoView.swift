@@ -165,7 +165,7 @@ private final class PhotoScrollView: NSScrollView {
     }
 }
 
-private final class PhotoCanvasView: NSView {
+private final class PhotoCanvasView: NSView, ReviewKeyboardResponder {
     var image: CGImage?
     var imageRect = CGRect.zero
     var faces: [FaceInfo] = []

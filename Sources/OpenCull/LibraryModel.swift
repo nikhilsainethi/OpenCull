@@ -40,6 +40,19 @@ struct GridSection: Identifiable {
     let items: [PhotoItem]
 }
 
+/// A detached loader owns this immutable value snapshot until the MainActor
+/// installs it. SessionStore is itself Sendable and all other payloads are values.
+private struct LoadedAlbum: @unchecked Sendable {
+    let store: SessionStore
+    let items: [PhotoItem]
+    let records: [String: PhotoWorkspaceRecord]
+    let fingerprints: [String: String]
+    let analysisCache: [String: PhotoAnalysis]
+    let savedDecisions: [String: SessionStore.Entry]
+    let savedRecords: [String: PhotoWorkspaceRecord]
+    let messages: [String]
+}
+
 @MainActor @Observable
 final class LibraryModel {
     private(set) var folder: URL?
@@ -63,6 +76,7 @@ final class LibraryModel {
     private(set) var exportProgress = ""
     private(set) var isFindingDuplicates = false
     private(set) var isImporting = false
+    private(set) var isOpening = false
     private(set) var layoutVersion = 0
     private(set) var editRevision = 0
     private(set) var saveStatus = "Saved"
@@ -77,14 +91,22 @@ final class LibraryModel {
     @ObservationIgnored private let defaults: UserDefaults
     @ObservationIgnored private let io: WorkspaceIO
     @ObservationIgnored private let analyzePhoto: @Sendable (URL, URL?) throws -> PhotoAnalysis
+    @ObservationIgnored private let scanPhotos: @Sendable (URL, Bool) throws -> [PhotoItem]
     @ObservationIgnored private var store: SessionStore?
     @ObservationIgnored private var analysisCache: [String: PhotoAnalysis] = [:]
     @ObservationIgnored private var fingerprints: [String: String] = [:]
+    // Keep entries outside the current scan (for example excluded subfolders).
+    // They are validated against source fingerprints when rediscovered.
+    @ObservationIgnored private var retainedDecisions: [String: SessionStore.Entry] = [:]
+    @ObservationIgnored private var retainedRecords: [String: PhotoWorkspaceRecord] = [:]
     private(set) var records: [String: PhotoWorkspaceRecord] = [:]
     @ObservationIgnored private var examples: [String: PreferenceExample] = [:]
     @ObservationIgnored private var analysisTask: Task<Void, Never>?
     @ObservationIgnored private var saveTask: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
+    @ObservationIgnored private var openingRequest = UUID()
+    @ObservationIgnored private var openingTask: Task<LoadedAlbum, Error>?
+    @ObservationIgnored private var workspaceRevision = 0
     @ObservationIgnored private var indexByID: [String: Int] = [:]
     private var undoStack: [WorkspaceSnapshot] = []
     private var redoStack: [WorkspaceSnapshot] = []
@@ -96,9 +118,11 @@ final class LibraryModel {
     var redoTitle: String { redoStack.last.map { "Redo \($0.name)" } ?? "Redo" }
 
     init(appDataDirectory: URL? = nil, defaults: UserDefaults = .standard,
-         analyze: @escaping @Sendable (URL, URL?) throws -> PhotoAnalysis = { try PhotoAnalyzer().analyze(url: $0, fallback: $1) }) {
+         analyze: @escaping @Sendable (URL, URL?) throws -> PhotoAnalysis = { try PhotoAnalyzer().analyze(url: $0, fallback: $1) },
+         scan: @escaping @Sendable (URL, Bool) throws -> [PhotoItem] = { try PhotoScanner.scan(folder: $0, recursive: $1) }) {
         self.defaults = defaults
         analyzePhoto = analyze
+        scanPhotos = scan
         let root = appDataDirectory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("OpenCull", isDirectory: true)
         io = WorkspaceIO(root: root)
@@ -168,7 +192,10 @@ final class LibraryModel {
         selectedID = selection.contains(id) ? id : selectedItems.first?.id
         if mode == .compare { capComparisonSelection() }
     }
-    func selectAllVisible() { selection = Set(visibleItems.map(\.id)); selectedID = visibleItems.first?.id }
+    func selectAllVisible() {
+        selection = Set(visibleItems.map(\.id)); selectedID = visibleItems.first?.id
+        if mode == .compare { capComparisonSelection() }
+    }
     private func reconcileSelection() {
         let visible = visibleItems
         let ids = Set(visible.map(\.id))
@@ -186,30 +213,107 @@ final class LibraryModel {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.prompt = "Open album"; panel.message = "Choose a folder of photos"
-        if panel.runModal() == .OK, let url = panel.url { open(url) }
+        if panel.runModal() == .OK, let url = panel.url { Task { await open(url) } }
     }
-    func open(_ url: URL) {
+    func open(_ url: URL) async {
         guard !isExporting, !isImporting else { return }
-        let scanned: [PhotoItem]
-        do { scanned = try PhotoScanner.scan(folder: url, recursive: recursive) }
-        catch { alert = AlertMessage(title: "Could not open folder", message: error.localizedDescription); return }
         guard flushPendingSaves() else { return }
+        openingTask?.cancel()
+        let request = UUID(), recursive = recursive, scan = scanPhotos
+        let sessions = io.root.appendingPathComponent("Sessions")
+        openingRequest = request; isOpening = true
+        let task = Task.detached(priority: .userInitiated) {
+            try Self.loadAlbum(url, recursive: recursive, sessions: sessions, scan: scan)
+        }
+        openingTask = task
+        defer {
+            if openingRequest == request { isOpening = false; openingTask = nil }
+        }
+        var loaded: LoadedAlbum
+        var readRevision = workspaceRevision
+        do {
+            loaded = try await task.value
+            guard openingRequest == request, !Task.isCancelled else { return }
+            guard flushPendingSaves() else { return }
+            // A pending adjustment/undo can complete while this same album is
+            // loading. Flush and reread its state rather than install stale work.
+            while store?.directory == loaded.store.directory && readRevision != workspaceRevision {
+                readRevision = workspaceRevision
+                let scanned = loaded.items
+                let retry = Task.detached(priority: .userInitiated) {
+                    try Self.loadAlbum(url, recursive: recursive, sessions: sessions, scan: { _, _ in scanned })
+                }
+                openingTask = retry
+                loaded = try await retry.value
+                guard openingRequest == request, !Task.isCancelled else { return }
+                guard flushPendingSaves() else { return }
+            }
+        }
+        catch {
+            guard openingRequest == request, !Task.isCancelled, !(error is CancellationError) else { return }
+            alert = AlertMessage(title: "Could not open folder", message: error.localizedDescription)
+            return
+        }
         analysisTask?.cancel()
         generation = UUID()
         isAnalyzing = false
-        let newStore = SessionStore(folder: url, baseDirectory: io.root.appendingPathComponent("Sessions"))
+        folder = url; store = loaded.store; items = loaded.items
+        records = loaded.records; fingerprints = loaded.fingerprints; analysisCache = loaded.analysisCache
+        retainedDecisions = loaded.savedDecisions; retainedRecords = loaded.savedRecords
+        editRevision &+= 1
+        undoStack = []; redoStack = []; lastEditKey = nil
+        filter = .all; searchText = ""; selection = []; selectedID = nil
+        reevaluate(); reconcileSelection()
+        window?.title = "\(url.lastPathComponent) — OpenCull"
+        recentAlbums.removeAll { $0.path == url.path }
+        recentAlbums.insert(RecentAlbum(path: url.path, opened: Date(), recursive: recursive, count: items.count), at: 0)
+        recentAlbums = Array(recentAlbums.prefix(12))
+        if !loaded.messages.isEmpty { alert = AlertMessage(title: "Album opened with notes", message: loaded.messages.joined(separator: "\n\n")) }
+        scheduleSave()
+        startAnalysis()
+    }
+    func cancelOpening() {
+        openingRequest = UUID(); openingTask?.cancel(); openingTask = nil; isOpening = false
+    }
+
+    private nonisolated static func loadAlbum(_ url: URL, recursive: Bool, sessions: URL,
+        scan: @Sendable (URL, Bool) throws -> [PhotoItem]) throws -> LoadedAlbum {
+        try Task.checkCancellation()
+        let scanned = try scan(url, recursive)
+        try Task.checkCancellation()
+        let newStore = SessionStore(folder: url, baseDirectory: sessions)
         var decisions: [String: SessionStore.Entry] = [:]
         var workspace = WorkspaceDocument()
         var messages: [String] = []
-        do { decisions = try newStore.readDecisions() } catch { messages.append(error.localizedDescription) }
-        do { analysisCache = try newStore.readAnalysis() } catch { analysisCache = [:]; messages.append(error.localizedDescription) }
-        do { workspace = try io.read(WorkspaceDocument.self, at: newStore.directory.appendingPathComponent("workspace.json")) ?? WorkspaceDocument() }
+        var cache: [String: PhotoAnalysis] = [:]
+        do { decisions = try newStore.readDecisions() }
+        catch let error as SessionStore.ReadError where error.recoveryCopy == nil { throw error }
         catch { messages.append(error.localizedDescription) }
-        fingerprints = Dictionary(uniqueKeysWithValues: scanned.map { ($0.id, newStore.fingerprint(for: $0)) })
-        records = [:]
-        var loaded = scanned
+        do { cache = try newStore.readAnalysis() }
+        catch let error as SessionStore.ReadError where error.recoveryCopy == nil { throw error }
+        catch { messages.append(error.localizedDescription) }
+        let workspaceURL = newStore.directory.appendingPathComponent("workspace.json")
+        if FileManager.default.fileExists(atPath: workspaceURL.path) {
+            do { workspace = try JSONDecoder().decode(WorkspaceDocument.self, from: Data(contentsOf: workspaceURL)) }
+            catch {
+                let backup = workspaceURL.appendingPathExtension("corrupt-\(UUID().uuidString)")
+                let detail = error.localizedDescription
+                do { try FileManager.default.copyItem(at: workspaceURL, to: backup) }
+                catch { throw WorkspaceError.unreadable(workspaceURL.lastPathComponent, nil, detail) }
+                messages.append(WorkspaceError.unreadable(workspaceURL.lastPathComponent, backup.lastPathComponent, detail).localizedDescription)
+            }
+        }
+        var fingerprints: [String: String] = [:]
+        for item in scanned {
+            try Task.checkCancellation()
+            fingerprints[item.id] = newStore.fingerprint(for: item)
+        }
+        var records: [String: PhotoWorkspaceRecord] = [:]
+        // A consistency retry reuses a prior file list, never its old choices.
+        var loaded = scanned.map { PhotoItem(url: $0.url, companions: $0.companions, fileSize: $0.fileSize, modificationDate: $0.modificationDate) }
         var legacy = 0, changed = 0
         for i in loaded.indices {
+            try Task.checkCancellation()
             let id = loaded[i].id, key = newStore.key(for: loaded[i].url), fingerprint = fingerprints[id]!
             if let entry = decisions[key] {
                 if entry.fingerprint == fingerprint || entry.fingerprint == nil {
@@ -219,35 +323,25 @@ final class LibraryModel {
             }
             if let record = workspace.records[key], record.fingerprint == fingerprint { records[id] = record }
             else { records[id] = PhotoWorkspaceRecord(fingerprint: fingerprint) }
-            loaded[i].analysis = analysisCache[newStore.analysisKey(for: loaded[i])]
+            loaded[i].analysis = cache[newStore.analysisKey(for: loaded[i])]
         }
-        folder = url; store = newStore; items = loaded
-        editRevision &+= 1
-        undoStack = []; redoStack = []; lastEditKey = nil
-        filter = .all; searchText = ""; selection = []; selectedID = nil
-        reevaluate(); reconcileSelection()
-        window?.title = "\(url.lastPathComponent) — OpenCull"
-        recentAlbums.removeAll { $0.path == url.path }
-        recentAlbums.insert(RecentAlbum(path: url.path, opened: Date(), recursive: recursive, count: items.count), at: 0)
-        recentAlbums = Array(recentAlbums.prefix(12))
         if legacy > 0 { messages.append("Restored \(legacy) legacy choices without file identity. Review them before export; future saves track identity.") }
         if changed > 0 { messages.append("\(changed) files changed since the saved choices. Their old choices were not applied.") }
-        if items.isEmpty { messages.append("No supported photos were found. Enable Include subfolders to scan nested folders.") }
-        if !messages.isEmpty { alert = AlertMessage(title: "Album opened with notes", message: messages.joined(separator: "\n\n")) }
-        scheduleSave()
-        startAnalysis()
+        if loaded.isEmpty { messages.append("No supported photos were found. Enable Include subfolders to scan nested folders.") }
+        return LoadedAlbum(store: newStore, items: loaded, records: records, fingerprints: fingerprints, analysisCache: cache,
+                           savedDecisions: decisions, savedRecords: workspace.records, messages: messages)
     }
-    func openRecent(_ album: RecentAlbum) { recursive = album.recursive; open(URL(fileURLWithPath: album.path)) }
+    func openRecent(_ album: RecentAlbum) { recursive = album.recursive; Task { await open(URL(fileURLWithPath: album.path)) } }
     func beginPhotosImport() throws -> URL {
-        guard !isImporting, !isExporting else { throw CocoaError(.userCancelled) }
+        guard !isImporting, !isExporting, !isOpening else { throw CocoaError(.userCancelled) }
         let album = io.root.appendingPathComponent("Imports/Photos-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: album, withIntermediateDirectories: true)
         isImporting = true
         return album
     }
-    func finishPhotosImport(_ album: URL?) {
+    func finishPhotosImport(_ album: URL?) async {
         isImporting = false
-        if let album { open(album) }
+        if let album { await open(album) }
     }
     nonisolated static func storeImportedImage(_ data: Data, index: Int, in album: URL) throws {
         guard index >= 0,
@@ -573,6 +667,7 @@ final class LibraryModel {
     }
     func resetPreference() { examples = [:]; rebuildPreference(); reevaluate(); scheduleSave() }
     private func scheduleSave() {
+        workspaceRevision &+= 1
         hasUnsavedChanges = true; saveStatus = "Saving…"
         saveTask?.cancel()
         saveTask = Task { [weak self] in
@@ -588,9 +683,10 @@ final class LibraryModel {
     @discardableResult private func saveNow() -> Bool {
         do {
             if let store {
-                var entries: [String: SessionStore.Entry] = [:], persistedRecords: [String: PhotoWorkspaceRecord] = [:]
+                var entries = retainedDecisions, persistedRecords = retainedRecords
                 for item in items {
                     let key = store.key(for: item.url)
+                    entries.removeValue(forKey: key)
                     if item.decision != .undecided || item.rating > 0 {
                         entries[key] = SessionStore.Entry(decision: item.decision, rating: item.rating, fingerprint: fingerprints[item.id])
                     }
@@ -598,6 +694,7 @@ final class LibraryModel {
                 }
                 try store.saveDecisions(entries)
                 try io.write(WorkspaceDocument(records: persistedRecords), at: store.directory.appendingPathComponent("workspace.json"))
+                retainedDecisions = entries; retainedRecords = persistedRecords
             }
             try io.write(GlobalWorkspaceDocument(recents: recentAlbums, styles: styles, examples: examples), at: io.globalURL)
             hasUnsavedChanges = false; saveStatus = "Saved"; return true
@@ -646,7 +743,7 @@ final class LibraryModel {
         return true
     }
     func writeSidecars() {
-        guard !isExporting, !isAnalyzing, !isImporting else { return }
+        guard !isExporting, !isAnalyzing, !isImporting, !isOpening else { return }
         let candidates = items.filter { $0.decision != .undecided || $0.rating > 0 || records[$0.id]?.exported == true }
         guard validateExportInputs(candidates), let store else { return }
         let expected = fingerprints
@@ -682,13 +779,13 @@ final class LibraryModel {
         }
     }
     func copyPicks() {
-        guard !isExporting, !isImporting else { return }
+        guard !isExporting, !isImporting, !isOpening else { return }
         let picks = items.filter { $0.decision == .pick }
         guard !picks.isEmpty, let destination = chooseDestination(message: "Copy \(picks.count) picked original photo bundles") else { return }
         copy(picks, to: destination)
     }
     func copy(_ photos: [PhotoItem], to destination: URL) {
-        guard !isExporting, !isImporting, !photos.isEmpty else { return }
+        guard !isExporting, !isImporting, !isOpening, !photos.isEmpty else { return }
         guard validateExportInputs(photos), let store else { return }
         let expected = fingerprints
         if let folder, destination.resolvingSymlinksInPath().standardizedFileURL == folder.resolvingSymlinksInPath().standardizedFileURL {
@@ -709,7 +806,7 @@ final class LibraryModel {
         return panel.runModal() == .OK ? panel.url : nil
     }
     func exportEdited(to destination: URL, format: ImageExportFormat, quality: Double, maxPixelSize: Int?, metadata: ExportMetadataPolicy, allPicks: Bool) {
-        guard !isExporting, !isImporting else { return }
+        guard !isExporting, !isImporting, !isOpening else { return }
         let photos = allPicks ? items.filter { $0.decision == .pick } : selectedItems
         guard !photos.isEmpty else { alert = AlertMessage(title: "No photos selected", message: "Select photos or mark picks before exporting."); return }
         guard validateExportInputs(photos), let store else { return }

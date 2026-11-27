@@ -5,7 +5,7 @@ import XCTest
 @testable import OpenCull
 
 final class WorkspaceEditingTests: XCTestCase {
-    @MainActor private func workspace(count: Int = 3) throws -> (LibraryModel, URL, URL, UserDefaults) {
+    @MainActor private func workspace(count: Int = 3) async throws -> (LibraryModel, URL, URL, UserDefaults) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("OpenCull-edit-workflow-\(UUID().uuidString)")
         let photos = root.appendingPathComponent("Photos"), data = root.appendingPathComponent("State")
         try FileManager.default.createDirectory(at: photos, withIntermediateDirectories: true)
@@ -26,13 +26,13 @@ final class WorkspaceEditingTests: XCTestCase {
         try store.saveAnalysis(cache)
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let model = LibraryModel(appDataDirectory: data, defaults: defaults)
-        model.autoAdvance = false; model.open(photos)
+        model.autoAdvance = false; await model.open(photos)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         return (model, photos, data, defaults)
     }
 
-    @MainActor func testEditBatchUndoRedoAndReload() throws {
-        let (model, photos, data, defaults) = try workspace()
+    @MainActor func testEditBatchUndoRedoAndReload() async throws {
+        let (model, photos, data, defaults) = try await workspace()
         let first = try XCTUnwrap(model.selectedItem)
         let original = try Data(contentsOf: first.url)
         var edit = EditRecipe(); edit.exposure = 1.25; edit.crop = CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
@@ -46,14 +46,14 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertEqual(model.recipe(for: model.items[1]), edit)
         XCTAssertTrue(model.flushPendingSaves())
         let reopened = LibraryModel(appDataDirectory: data, defaults: defaults)
-        reopened.open(photos)
+        await reopened.open(photos)
         XCTAssertTrue(reopened.items.allSatisfy { reopened.recipe(for: $0) == edit })
         XCTAssertEqual(try Data(contentsOf: first.url), original)
         _ = reopened.flushPendingSaves()
     }
 
-    @MainActor func testBulkChoicesUndoAsOneAction() throws {
-        let (model, _, _, _) = try workspace()
+    @MainActor func testBulkChoicesUndoAsOneAction() async throws {
+        let (model, _, _, _) = try await workspace()
         model.selectAllVisible(); model.setDecision(.pick)
         XCTAssertEqual(model.counts.picks, 3)
         model.undo(); XCTAssertEqual(model.counts.undecided, 3)
@@ -61,8 +61,8 @@ final class WorkspaceEditingTests: XCTestCase {
         _ = model.flushPendingSaves()
     }
 
-    @MainActor func testSearchByVisionLabelMaintainsVisibleSelection() throws {
-        let (model, _, _, _) = try workspace()
+    @MainActor func testSearchByVisionLabelMaintainsVisibleSelection() async throws {
+        let (model, _, _, _) = try await workspace()
         model.searchText = "mountain"
         XCTAssertEqual(model.visibleItems.count, 3)
         model.searchText = "no such subject"
@@ -73,8 +73,8 @@ final class WorkspaceEditingTests: XCTestCase {
         _ = model.flushPendingSaves()
     }
 
-    @MainActor func testReplacedPhotoDoesNotInheritChoicesOrEdits() throws {
-        let (model, photos, data, defaults) = try workspace()
+    @MainActor func testReplacedPhotoDoesNotInheritChoicesOrEdits() async throws {
+        let (model, photos, data, defaults) = try await workspace()
         let first = try XCTUnwrap(model.selectedItem)
         model.setDecision(.pick)
         var edit = EditRecipe(); edit.exposure = 2
@@ -82,34 +82,34 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertTrue(model.flushPendingSaves())
         try Data([0, 1, 2, 3, 4]).write(to: first.url)
         let reopened = LibraryModel(appDataDirectory: data, defaults: defaults)
-        reopened.open(photos)
+        await reopened.open(photos)
         let changed = try XCTUnwrap(reopened.items.first { $0.id == first.id })
         XCTAssertEqual(changed.decision, .undecided)
         XCTAssertEqual(reopened.recipe(for: changed), .identity)
         _ = reopened.flushPendingSaves()
     }
 
-    @MainActor func testSaveFailureLeavesWorkDirtyAndObservable() throws {
-        let (_, photos, data, defaults) = try workspace()
+    @MainActor func testSaveFailureLeavesWorkDirtyAndObservable() async throws {
+        let (_, photos, data, defaults) = try await workspace()
         let blocked = data.deletingLastPathComponent().appendingPathComponent("blocked")
         try Data([0]).write(to: blocked)
         let model = LibraryModel(appDataDirectory: blocked, defaults: defaults)
-        model.open(photos); model.setDecision(.pick)
+        await model.open(photos); model.setDecision(.pick)
         XCTAssertFalse(model.flushPendingSaves())
         XCTAssertEqual(model.saveStatus, "Save failed")
         XCTAssertTrue(model.hasUnsavedChanges)
         XCTAssertEqual(model.counts.picks, 1)
     }
 
-    @MainActor func testLocalStyleAndManualGroupsPersist() throws {
-        let (model, photos, data, defaults) = try workspace()
+    @MainActor func testLocalStyleAndManualGroupsPersist() async throws {
+        let (model, photos, data, defaults) = try await workspace()
         var edit = EditRecipe(); edit.contrast = 1.2
         model.setRecipe(edit); model.saveStyle(name: "Everyday")
         model.selectAllVisible(); model.mergeSelectedGroup()
         XCTAssertEqual(Set(model.items.compactMap(\.groupID)).count, 1)
         XCTAssertTrue(model.flushPendingSaves())
         let reopened = LibraryModel(appDataDirectory: data, defaults: defaults)
-        reopened.open(photos)
+        await reopened.open(photos)
         XCTAssertEqual(reopened.styles.last?.name, "Everyday")
         XCTAssertEqual(reopened.styles.last?.recipe, edit)
         XCTAssertEqual(Set(reopened.items.compactMap(\.groupID)).count, 1)
@@ -119,7 +119,7 @@ final class WorkspaceEditingTests: XCTestCase {
     }
 
     @MainActor func testUndoChoiceStillClearsEarlierXMPExport() async throws {
-        let (model, _, _, _) = try workspace()
+        let (model, _, _, _) = try await workspace()
         let photo = try XCTUnwrap(model.selectedItem)
         model.setDecision(.pick)
         model.writeSidecars()
@@ -139,7 +139,7 @@ final class WorkspaceEditingTests: XCTestCase {
     }
 
     @MainActor func testAutoToneKeepsCompositionColorAndDetail() async throws {
-        let (model, _, _, _) = try workspace()
+        let (model, _, _, _) = try await workspace()
         var edit = EditRecipe()
         edit.exposure = 3; edit.rotation = 90; edit.crop = CGRect(x: 0.1, y: 0.2, width: 0.8, height: 0.7)
         edit.temperature = 7800; edit.vibrance = 0.2; edit.sharpness = 0.8; edit.contrast = 1.2
@@ -158,13 +158,13 @@ final class WorkspaceEditingTests: XCTestCase {
     }
 
     @MainActor func testRenderedExportUsesCompanionAndCurrentEmbeddedChoices() async throws {
-        let (model, photos, _, _) = try workspace()
+        let (model, photos, _, _) = try await workspace()
         let source = photos.appendingPathComponent("photo0.png")
         let raw = photos.appendingPathComponent("A.CR3"), jpeg = photos.appendingPathComponent("A.JPG")
         let rep = try XCTUnwrap(NSBitmapImageRep(data: Data(contentsOf: source)))
         try rep.representation(using: .jpeg, properties: [.compressionFactor: 0.95])!.write(to: jpeg)
         let badRaw = Data([0, 1, 2]); try badRaw.write(to: raw)
-        model.open(photos)
+        await model.open(photos)
         let rawItem = try XCTUnwrap(model.items.first { $0.fileName == "A.CR3" })
         model.select(rawItem.id)
         XCTAssertEqual(model.selectedItem?.fileName, "A.CR3")
@@ -185,8 +185,8 @@ final class WorkspaceEditingTests: XCTestCase {
         _ = model.flushPendingSaves()
     }
 
-    @MainActor func testPreferenceCapUsesRecentChoicesRatherThanFileNames() throws {
-        let (_, _, data, defaults) = try workspace()
+    @MainActor func testPreferenceCapUsesRecentChoicesRatherThanFileNames() async throws {
+        let (_, _, data, defaults) = try await workspace()
         let a = PhotoAnalysis(pixelWidth: 48, pixelHeight: 48, captureDate: nil, sharpness: 300, subjectSharpness: 300,
                               meanLuminance: 0.5, highlightClipping: 0, shadowClipping: 0, faces: [])
         var examples: [String: PreferenceExample] = [:]
@@ -200,8 +200,8 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertFalse(model.preference.isReady)
     }
 
-    @MainActor func testPickingComparedPhotoPreservesComparisonSelection() throws {
-        let (model, _, _, _) = try workspace()
+    @MainActor func testPickingComparedPhotoPreservesComparisonSelection() async throws {
+        let (model, _, _, _) = try await workspace()
         model.selectAllVisible(); model.mode = .compare
         let ids = model.selection
         let id = try XCTUnwrap(model.comparisonItems.last?.id)
@@ -214,22 +214,22 @@ final class WorkspaceEditingTests: XCTestCase {
     }
 
     @MainActor func testPhotosImportStreamsCopiesWithIndependentNames() async throws {
-        let (model, photos, _, _) = try workspace()
+        let (model, photos, _, _) = try await workspace()
         let data = try Data(contentsOf: photos.appendingPathComponent("photo0.png"))
         let album = try model.beginPhotosImport()
         XCTAssertTrue(model.isImporting)
         try LibraryModel.storeImportedImage(data, index: 0, in: album)
         try LibraryModel.storeImportedImage(data, index: 1, in: album)
         XCTAssertThrowsError(try LibraryModel.storeImportedImage(data, index: 0, in: album))
-        model.finishPhotosImport(album)
+        await model.finishPhotosImport(album)
         XCTAssertFalse(model.isImporting)
         XCTAssertEqual(model.items.count, 2)
         XCTAssertEqual(try Data(contentsOf: model.items[0].url), data)
         _ = model.flushPendingSaves()
     }
 
-    @MainActor func testLearnedStyleAdaptsBatchPreservesCompositionAndReloads() throws {
-        let (model, photos, data, defaults) = try workspace(count: 8)
+    @MainActor func testLearnedStyleAdaptsBatchPreservesCompositionAndReloads() async throws {
+        let (model, photos, data, defaults) = try await workspace(count: 8)
         let ids = model.items.map(\.id)
         var originalEdits: [String: EditRecipe] = [:]
         for id in ids {
@@ -256,13 +256,13 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertEqual(model.recipe(for: first), originalEdits[first.id])
         XCTAssertTrue(model.flushPendingSaves())
         let reopened = LibraryModel(appDataDirectory: data, defaults: defaults)
-        reopened.open(photos)
+        await reopened.open(photos)
         XCTAssertEqual(reopened.styles.last?.profile, style.profile)
         _ = reopened.flushPendingSaves()
     }
 
-    @MainActor func testChangedFileCannotReceiveEarlierChoicesOrEditsOnExport() throws {
-        let (model, photos, data, _) = try workspace()
+    @MainActor func testChangedFileCannotReceiveEarlierChoicesOrEditsOnExport() async throws {
+        let (model, photos, data, _) = try await workspace()
         let original = try XCTUnwrap(model.selectedItem)
         model.setDecision(.pick)
         var edit = EditRecipe(); edit.exposure = 1; model.setRecipe(edit)
@@ -289,8 +289,8 @@ final class WorkspaceEditingTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: original.url), bytes)
     }
 
-    @MainActor func testOriginalIntentCancelsPendingEditRevisionWithoutAddingUndo() throws {
-        let (model, _, _, _) = try workspace()
+    @MainActor func testOriginalIntentCancelsPendingEditRevisionWithoutAddingUndo() async throws {
+        let (model, _, _, _) = try await workspace()
         let revision = model.editRevision
         XCTAssertEqual(model.selectedRecipe, .identity)
         model.setRecipe(.identity, name: "Remove crop")

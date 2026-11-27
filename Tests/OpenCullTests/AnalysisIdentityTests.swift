@@ -54,7 +54,7 @@ final class AnalysisIdentityTests: XCTestCase {
         })
         let store = SessionStore(folder: photos, baseDirectory: data.appendingPathComponent("Sessions"))
         let originalKey = store.analysisKey(for: try XCTUnwrap(PhotoScanner.scan(folder: photos).first))
-        model.open(photos)
+        await model.open(photos)
         XCTAssertTrue(model.isAnalyzing)
 
         // Yield the MainActor while waiting for the background worker to enter its gate.
