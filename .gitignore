@@ -11,3 +11,6 @@ research/
 
 # Local test photos
 TestPhotos/
+
+# Local test-runner diagnostics
+ci-diagnostics/

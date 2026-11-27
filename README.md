@@ -63,7 +63,8 @@ import preserves the current album. Source information is stored locally beside
 the imported copies and displayed in the inspector.
 
 **Apple Photos** uses the system picker with the current representation requested.
-Only chosen items are copied; available asset identifiers are retained locally.
+Only chosen items are copied; available asset identifiers are retained locally. When the picker does not expose
+a source filename, copies receive `Photo_00001`-style names.
 The supplied representation can be rendered or converted, so original/RAW quality
 is explicitly unverified. iCloud items may need internet before import. This is
 not a Photos library browser and does not write decisions back to Photos.

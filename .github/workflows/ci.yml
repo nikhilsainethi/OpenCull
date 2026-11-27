@@ -21,7 +21,14 @@ jobs:
       - name: Build
         run: swift build
       - name: Test
-        run: swift test
+        run: python3 scripts/test-with-diagnostics.py
+      - name: Retain test hang diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenCull-test-diagnostics
+          path: ci-diagnostics/
+          if-no-files-found: ignore
       - name: Universal release smoke test
         run: ./scripts/build-app.sh
       - name: Verify copied release archive
