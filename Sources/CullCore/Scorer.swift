@@ -35,6 +35,11 @@ public struct ScoringOptions: Codable, Sendable, Equatable {
 /// Turns measurements into issues, a 0-100 score, the best shot of each group and a
 /// suggested decision. All rules are simple, documented heuristics.
 public enum Scorer {
+    private static func technicallyRejected(_ issues: [Issue], options: ScoringOptions) -> Bool {
+        issues.contains(.blurry) || issues.contains(.eyesClosed)
+            || (options.rejectExposureProblems && (issues.contains(.overexposed) || issues.contains(.underexposed)))
+    }
+
     public static func issues(for a: PhotoAnalysis, groupMaxSharpness: Float?, options: ScoringOptions) -> [Issue] {
         var result: [Issue] = []
         let relativeBlurry = groupMaxSharpness.map { $0 > 0 && a.subjectSharpness < $0 * options.blurRelativeThreshold } ?? false
@@ -125,7 +130,13 @@ public enum Scorer {
             let reliable = indices.filter {
                 items[$0].analysisError == nil && items[$0].analysis?.analysisWarnings.isEmpty == true
             }
-            let maxSharpness = isGroup ? reliable.compactMap { items[$0].analysis?.subjectSharpness }.max() : nil
+            // A closed-eye/exposure failure is not a usable alternative either. Apply
+            // absolute checks before deriving relative focus, avoiding a circular test.
+            let references = reliable.filter { i in
+                guard let analysis = items[i].analysis else { return false }
+                return !technicallyRejected(issues(for: analysis, groupMaxSharpness: nil, options: scoring), options: scoring)
+            }
+            let maxSharpness = isGroup ? references.compactMap { items[$0].analysis?.subjectSharpness }.max() : nil
 
             for i in indices {
                 guard let analysis = items[i].analysis else { continue }
@@ -138,12 +149,12 @@ public enum Scorer {
                 items[i].isBestInGroup = false
             }
 
-            let best = reliable.max { (items[$0].score ?? 0) < (items[$1].score ?? 0) }
+            let usable = reliable.filter { !technicallyRejected(items[$0].issues, options: scoring) }
+            let best = usable.max { (items[$0].score ?? 0) < (items[$1].score ?? 0) }
             if let best, isGroup { items[best].isBestInGroup = true }
 
             for i in indices {
-                let serious = items[i].issues.contains(.blurry) || items[i].issues.contains(.eyesClosed)
-                    || (scoring.rejectExposureProblems && (items[i].issues.contains(.overexposed) || items[i].issues.contains(.underexposed)))
+                let serious = technicallyRejected(items[i].issues, options: scoring)
                 let warnings = items[i].analysis?.analysisWarnings ?? []
                 if !warnings.isEmpty || items[i].analysisError != nil {
                     items[i].suggestion = .undecided

@@ -41,4 +41,49 @@ final class ReviewSafetyTests: XCTestCase {
         XCTAssertEqual(proposed, 1)
         XCTAssertTrue(items.filter(\.needsReview).allSatisfy { $0.suggestion == .undecided })
     }
+
+    func testClosedEyesCannotWinBestOrMakeAUsableAlternativeLookBlurry() {
+        for closedSharpness: Float in [500, 3000] {
+            var open = photo("open", sharpness: 500)
+            var closed = photo("closed", sharpness: closedSharpness)
+            let box = CGRect(x: 0.3, y: 0.2, width: 0.3, height: 0.4)
+            open.analysis?.faces = [FaceInfo(boundingBox: box, captureQuality: 0, eyeOpenness: 0.3, sharpness: 500)]
+            open.analysis?.aestheticScore = -1
+            closed.analysis?.faces = [FaceInfo(boundingBox: box, captureQuality: 1, eyeOpenness: 0.05, sharpness: closedSharpness)]
+            closed.analysis?.aestheticScore = 1
+            var items = [open, closed]
+            Scorer.evaluate(&items)
+            XCTAssertEqual(items[0].suggestion, .pick)
+            XCTAssertTrue(items[0].isBestInGroup)
+            XCTAssertFalse(items[0].issues.contains(.blurry))
+            XCTAssertEqual(items[1].suggestion, .reject)
+            XCTAssertFalse(items[1].isBestInGroup)
+        }
+    }
+
+    func testAllTechnicallyRejectedGroupHasNoUsableBest() {
+        var items = [photo("a", sharpness: 500), photo("b", sharpness: 1000)]
+        for i in items.indices {
+            items[i].analysis?.faces = [FaceInfo(boundingBox: CGRect(x: 0.3, y: 0.2, width: 0.3, height: 0.4),
+                                               captureQuality: 1, eyeOpenness: 0.05, sharpness: 500)]
+        }
+        Scorer.evaluate(&items)
+        XCTAssertTrue(items.allSatisfy { !$0.isBestInGroup && $0.suggestion == .reject })
+    }
+
+    func testExposurePolicyControlsFocusReferencesAndBestEligibility() {
+        let valid = photo("valid-exposure", sharpness: 300)
+        var clipped = photo("clipped", sharpness: 3000)
+        clipped.analysis?.meanLuminance = 0.99
+        clipped.analysis?.highlightClipping = 0.95
+        var items = [valid, clipped]
+        Scorer.evaluate(&items)
+        XCTAssertEqual(items[0].suggestion, .pick)
+        XCTAssertFalse(items[0].issues.contains(.blurry))
+        XCTAssertFalse(items[1].isBestInGroup)
+        var options = ScoringOptions(); options.rejectExposureProblems = false
+        Scorer.evaluate(&items, scoring: options)
+        XCTAssertTrue(items[1].isBestInGroup)
+        XCTAssertEqual(items[1].suggestion, .pick)
+    }
 }
