@@ -110,7 +110,7 @@ public enum XMPSidecar {
         for property in ["Rating", "Label"] {
             let recorded = properties("Last" + property, namespace: ownershipNamespace, in: descriptions).first?.node.stringValue
             let candidates = properties(property, namespace: xmpNamespace, in: descriptions)
-            for candidate in candidates where candidate.node.stringValue == recorded || (recorded == nil && legacyOwned) {
+            for candidate in candidates where (recorded != nil && candidate.node.stringValue == recorded) || (recorded == nil && legacyOwned) {
                 remove(candidate)
                 changed = true
             }
@@ -182,6 +182,13 @@ public enum XMPSidecar {
         let existing = properties(name, namespace: namespace, in: descriptions)
         if let first = existing.first {
             guard first.isAttribute || !(first.node.children ?? []).contains(where: { $0 is XMLElement }) else { return false }
+            if let element = first.node as? XMLElement {
+                // A resource or parseType form cannot safely become a scalar literal while
+                // retaining those RDF attributes. Typed literal rdf:datatype remains valid.
+                guard element.attribute(forLocalName: "resource", uri: rdfNamespace) == nil,
+                      element.attribute(forLocalName: "parseType", uri: rdfNamespace) == nil,
+                      element.attribute(forLocalName: "nodeID", uri: rdfNamespace) == nil else { return false }
+            }
             first.node.stringValue = value
             for duplicate in existing.dropFirst() { remove(duplicate) }
             return true

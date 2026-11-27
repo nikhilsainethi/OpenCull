@@ -213,6 +213,15 @@ final class MetadataSafetyTests: XCTestCase {
         XCTAssertEqual(try property("Rating", in: result), ["5"])
     }
 
+    func testResourceValuedRatingIsSkippedRatherThanGivenConflictingLiteral() {
+        let input = """
+        <rdf:RDF xmlns:rdf="\(rdf)" xmlns:xmp="\(xmp)">
+        <rdf:Description rdf:about=""><xmp:Rating rdf:resource="urn:external-rating"/></rdf:Description>
+        </rdf:RDF>
+        """
+        XCTAssertNil(XMPSidecar.update(existing: input, with: .init(rating: 5, label: "Green")))
+    }
+
     func testCorruptDecisionsThrowAndKeepRecoverableCopy() throws {
         let dir = try directory(), store = SessionStore(folder: dir.appendingPathComponent("Shoot"), baseDirectory: dir.appendingPathComponent("Sessions"))
         try FileManager.default.createDirectory(at: store.directory, withIntermediateDirectories: true)
