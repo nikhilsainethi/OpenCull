@@ -287,8 +287,10 @@ public enum PhotoEditor {
         try validate(width: Int(original.width), height: Int(original.height))
         result = result.transformed(by: CGAffineTransform(translationX: -original.minX, y: -original.minY))
         if recipe.temperature != 6500 || recipe.tint != 0 {
-            result = result.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: 6500, y: 0),
-                                                                                 "inputTargetNeutral": CIVector(x: recipe.temperature, y: recipe.tint)])
+            // Photographer-facing WB controls describe the assumed source light:
+            // higher Kelvin warms, and positive tint corrects green toward magenta.
+            result = result.applyingFilter("CITemperatureAndTint", parameters: ["inputNeutral": CIVector(x: recipe.temperature, y: recipe.tint),
+                                                                                 "inputTargetNeutral": CIVector(x: 6500, y: 0)])
         }
         if recipe.exposure != 0 { result = result.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: recipe.exposure]) }
         if recipe.highlights != 1 || recipe.shadows != 0 {

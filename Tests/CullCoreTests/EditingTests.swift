@@ -303,4 +303,14 @@ final class EditingTests: XCTestCase {
         XCTAssertThrowsError(try PhotoEditor.export(url: source, to: regularFile))
         XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: dir.path).contains { $0.contains("-edited") })
     }
+
+    func testHigherTemperatureWarmsAndPositiveTintMovesTowardMagenta() throws {
+        let original = image(red: 100, green: 100, blue: 100)
+        var warm = EditRecipe(); warm.temperature = 10000
+        let warmPixels = rgba(try PhotoEditor.render(image: original, recipe: warm))
+        XCTAssertGreaterThan(warmPixels[0], warmPixels[2], "Higher photographer white-balance temperature should warm the image")
+        var tint = EditRecipe(); tint.tint = 100
+        let tintedPixels = rgba(try PhotoEditor.render(image: original, recipe: tint))
+        XCTAssertLessThan(tintedPixels[1], max(tintedPixels[0], tintedPixels[2]), "Positive tint should move away from green")
+    }
 }
