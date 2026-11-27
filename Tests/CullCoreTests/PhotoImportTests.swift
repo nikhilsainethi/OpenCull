@@ -171,6 +171,8 @@ final class PhotoImportTests: XCTestCase {
     }
 
     func testUnsafeZIPPathsDuplicatesAndSymlinkNeverPublish() throws {
+        XCTAssertThrowsError(try SafeZIP.safeComponents(String(repeating: "a/", count: 65) + "photo.png"))
+        XCTAssertThrowsError(try SafeZIP.safeComponents(String(repeating: "directory/", count: 120) + "photo.png"))
         let root = try directory()
         let cases: [[Entry]] = [
             [Entry("../escape.png", Data([1]))], [Entry("/absolute.png", Data([1]))],

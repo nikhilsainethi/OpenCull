@@ -190,10 +190,16 @@ enum SafeZIP {
     }
 
     static func safeComponents(_ path: String) throws -> [String] {
+        // Bound work before splitting or joining directory prefixes. ZIP permits
+        // 65k-byte names that cannot be materialized as ordinary Mac paths.
+        guard path.utf8.count <= 1024 else {
+            throw PhotoImportError.invalidArchive("ZIP filenames must fit within 1024 UTF-8 bytes.")
+        }
         let body = path.hasSuffix("/") ? String(path.dropLast()) : path
         let components = body.components(separatedBy: "/")
         guard !body.isEmpty, !path.hasPrefix("/"), !path.contains("\\"), !path.contains(":"),
               !path.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              components.count <= 64,
               components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= 255 }) else {
             throw PhotoImportError.invalidArchive("Unsafe filename in ZIP: \(path)")
         }

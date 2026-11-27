@@ -57,7 +57,8 @@ Photos are supported when the source supplies them. Original filenames, folder
 relationships and RAW/JPEG/XMP companions are retained. ZIP expansion is bounded
 and rejects unsafe paths, links, encryption, malformed archives and unsupported
 ZIP64. The default import limits are 20,000 entries, 2 GiB expanded in total and
-512 MiB per file; split larger exports into smaller albums. Imports stage and publish a complete new album; cancelling or failing an
+512 MiB per file; archive paths are limited to 1024 UTF-8 bytes and 64 levels.
+Split larger exports into smaller albums. Imports stage and publish a complete new album; cancelling or failing an
 import preserves the current album. Source information is stored locally beside
 the imported copies and displayed in the inspector.
 

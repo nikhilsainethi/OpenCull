@@ -19,14 +19,14 @@ struct ImportSourcesView: View {
                 .foregroundStyle(.secondary)
             GroupBox {
                 sourceRow("Files, folders and ZIP archives", symbol: "folder") {
-                    Text("Keeps filenames, folder structure, RAW + JPEG pairs and sidecars.").font(.caption).foregroundStyle(.secondary)
+                    Text("Keeps filenames, folder structure, RAW + JPEG pairs and sidecars.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     Button("Choose files or archives…") { dismiss(); model.showImportPanel() }
                 }
             }
             GroupBox {
                 sourceRow("Apple Photos", symbol: "photo.on.rectangle") {
                     Text("Select from the system picker, or drag photos from Photos into OpenCull. The supplied representation may be edited or converted; its quality is shown as unverified.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     PhotosPicker(selection: $photoSelection, maxSelectionCount: 5_000, matching: .images, preferredItemEncoding: .current) {
                         Text("Choose from Apple Photos…")
                     }
@@ -35,18 +35,18 @@ struct ImportSourcesView: View {
             GroupBox {
                 sourceRow("Google Photos", symbol: "globe") {
                     Text("Open Google Photos, select photos and use Download. Then import the downloaded files or ZIP. For a large library, import Google Takeout ZIPs or an extracted Takeout folder.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Button("Open Google Photos ↗") { NSWorkspace.shared.open(URL(string: "https://photos.google.com/")!) }
                         Button("Import downloads…") { dismiss(); model.showImportPanel(source: .googlePhotos) }
                         Button("Import Takeout…") { dismiss(); model.showImportPanel(source: .takeout) }
                     }
                     Text("Web links and thumbnails do not give OpenCull access to your library. Downloads require internet; analysis stays local. Decisions and edits are exported as files.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
             Text("You can also drop local photos, folders or ZIP files onto the app.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
         .padding(24).frame(width: 680)
         .onChange(of: photoSelection) { _, selected in if !selected.isEmpty { dismiss() } }
