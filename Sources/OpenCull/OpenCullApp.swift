@@ -7,14 +7,12 @@ struct OpenCullApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = LibraryModel(appDataDirectory: ProcessInfo.processInfo.environment["OPENCULL_DATA_DIR"].map { URL(fileURLWithPath: $0) })
     @State private var aperture = ApertureMenuState()
-    @State private var wheel = CommandWheelState()
 
     var body: some Scene {
         Window("OpenCull", id: "main") {
             ContentView()
                 .environment(model)
                 .environment(aperture)
-                .environment(wheel)
                 .onAppear { appDelegate.model = model }
         }
         .defaultSize(width: 1560, height: 980)
@@ -30,11 +28,6 @@ struct OpenCullApp: App {
                 Button(aperture.isPresented ? "Close Aperture Menu" : "Aperture Menu") { aperture.toggleAtPointer() }
                     .keyboardShortcut("k")
                     .disabled(!aperture.isPresented && (aperture.isBlocked || model.isOpening || model.isImporting || model.isChoosingDestination))
-            }
-            CommandGroup(after: .toolbar) {
-                Button(wheel.isPresented ? "Close Command Wheel" : "Command Wheel") { wheel.toggleAtPointer() }
-                    .keyboardShortcut("k")
-                    .disabled(!wheel.isPresented && (wheel.isBlocked || model.isOpening || model.isImporting || model.isChoosingDestination))
             }
             CommandGroup(replacing: .undoRedo) {
                 Button(EditingUndoRouter.textManager(NSApp.keyWindow?.firstResponder)?.undoMenuItemTitle ?? model.undoTitle) {
