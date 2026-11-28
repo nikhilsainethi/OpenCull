@@ -6,6 +6,7 @@ struct BurstReviewRequest: Identifiable {
 }
 
 struct BurstComparisonSheet: View {
+    nonisolated static let initialZoom: ZoomMode = .face
     @Environment(LibraryModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     let anchorID: String
@@ -54,7 +55,7 @@ private struct BurstComparison: View {
     let runner: PhotoItem
     let pick: (String) -> Void
     @State private var pairIndex = 0
-    @State private var showWhole = false
+    @State private var zoom = BurstComparisonSheet.initialZoom
 
     private var pair: BurstFacePair? {
         comparison.pairs.indices.contains(pairIndex) ? comparison.pairs[pairIndex] : comparison.pairs.first
@@ -74,11 +75,12 @@ private struct BurstComparison: View {
                             Text(comparison.pairs[index].label).tag(index)
                         }
                     }
-                    .disabled(showWhole)
+                    .disabled(zoom == .fit)
                     Spacer()
-                    Picker("View", selection: $showWhole) {
-                        Text("Faces at 100%").tag(false)
-                        Text("Whole photos").tag(true)
+                    Picker("View", selection: $zoom) {
+                        Text("Face detail").tag(ZoomMode.face)
+                        Text("100%").tag(ZoomMode.actual)
+                        Text("Whole photos").tag(ZoomMode.fit)
                     }.pickerStyle(.segmented).fixedSize()
                 }
             } else {
@@ -88,9 +90,9 @@ private struct BurstComparison: View {
             HStack(alignment: .top, spacing: 16) {
                 BurstFrameColumn(item: winner, title: comparison.isCloseCall ? "First to review" : "Recommended",
                     summary: comparison.winnerSummary, faceIndex: pair?.winnerFaceIndex,
-                    inspectingFaces: !showWhole && pair != nil, pick: pick)
+                    zoom: pair == nil ? .fit : zoom, pick: pick)
                 BurstFrameColumn(item: runner, title: "Runner-up", summary: comparison.runnerUpSummary,
-                    faceIndex: pair?.runnerUpFaceIndex, inspectingFaces: !showWhole && pair != nil, pick: pick)
+                    faceIndex: pair?.runnerUpFaceIndex, zoom: pair == nil ? .fit : zoom, pick: pick)
             }
         }
     }
@@ -102,12 +104,13 @@ private struct BurstFrameColumn: View {
     let title: String
     let summary: String
     let faceIndex: Int?
-    let inspectingFaces: Bool
+    let zoom: ZoomMode
     let pick: (String) -> Void
 
     var body: some View {
         let face = BurstComparisonSheet.face(at: faceIndex, in: item.analysis?.faces ?? [])
-        let inspectFace = inspectingFaces && face != nil
+        let inspectFace = zoom != .fit && face != nil
+        let viewLabel = inspectFace ? (zoom == .actual ? "face at 100 percent" : "face detail") : "whole photo"
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title).font(.headline)
@@ -117,10 +120,10 @@ private struct BurstFrameColumn: View {
                 }
             }
             Text(item.fileName).font(.caption).lineLimit(1).truncationMode(.middle).help(item.fileName)
-            ZoomablePhotoView(item: item, recipe: .identity, zoom: inspectFace ? .actual : .fit,
-                              keyFace: inspectFace ? faceIndex : nil, centerAtActualSize: inspectFace, inspectingBurst: true)
+            ZoomablePhotoView(item: item, recipe: .identity, zoom: inspectFace ? zoom : .fit,
+                              keyFace: inspectFace ? faceIndex : nil, centerAtActualSize: inspectFace && zoom == .actual, inspectingBurst: true)
                 .frame(height: 230)
-                .accessibilityLabel("\(title), \(item.fileName), \(inspectFace ? "face at 100 percent" : "whole photo")")
+                .accessibilityLabel("\(title), \(item.fileName), \(viewLabel)")
                 .clipShape(RoundedRectangle(cornerRadius: 5))
             VStack(alignment: .leading, spacing: 4) {
                 if inspectFace, let face {
@@ -128,7 +131,7 @@ private struct BurstFrameColumn: View {
                     Text(face.leftEyeOpenness == nil && face.rightEyeOpenness == nil && face.eyeOpenness != nil
                          ? "Individual eye states unavailable" : evidence.eyeDescription).font(.subheadline.weight(.medium))
                     Text(evidence.attentionDescription).font(.caption).foregroundStyle(.secondary)
-                } else if inspectingFaces {
+                } else if zoom != .fit {
                     Label("No reliable face match · showing whole photo", systemImage: "questionmark.circle")
                         .font(.subheadline).foregroundStyle(.secondary)
                 }

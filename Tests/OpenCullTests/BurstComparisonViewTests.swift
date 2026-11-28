@@ -4,6 +4,25 @@ import XCTest
 @testable import OpenCull
 
 final class BurstComparisonViewTests: XCTestCase {
+    func testDefaultBurstViewFramesEitherASmallOrLargeFaceAndKeepsActualAvailable() {
+        let pane = CGSize(width: 360, height: 230)
+        for (pixels, face) in [
+            (CGSize(width: 744, height: 418), CGRect(x: 0.63, y: 0.22, width: 0.12, height: 0.28)),
+            (CGSize(width: 6000, height: 4000), CGRect(x: 0.35, y: 0.15, width: 0.3, height: 0.5))
+        ] {
+            let detail = PhotoViewportGeometry.layout(image: pixels, viewport: pane, backingScale: 2,
+                zoom: BurstComparisonSheet.initialZoom, face: face, frameBurstFace: true)
+            let actual = PhotoViewportGeometry.layout(image: pixels, viewport: pane, backingScale: 2,
+                zoom: .actual, face: face, frameBurstFace: true)
+            XCTAssertEqual(actual.imageRect.width * 2, pixels.width)
+            let height = detail.imageRect.height * face.height
+            XCTAssertGreaterThan(height, pane.height * 0.50)
+            XCTAssertLessThanOrEqual(height, pane.height * 0.75)
+            XCTAssertEqual(detail.center.x, detail.imageRect.minX + face.midX * detail.imageRect.width, accuracy: 0.01)
+            XCTAssertEqual(detail.center.y, detail.imageRect.minY + face.midY * detail.imageRect.height, accuracy: 0.01)
+        }
+    }
+
     func testInspectionUsesOriginalFaceIndexAndDoesNotSubstituteTheLargestFace() {
         let small = FaceInfo(boundingBox: CGRect(x: 0.1, y: 0.1, width: 0.06, height: 0.08))
         let large = FaceInfo(boundingBox: CGRect(x: 0.4, y: 0.1, width: 0.2, height: 0.3))

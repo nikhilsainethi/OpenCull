@@ -138,7 +138,8 @@ Choose **Posed group** in the shooting intent menu and open **Best available**
 on a group of similar photos. If an automatic grouping misses part of a burst,
 select its photos and use the album action to merge them. OpenCull compares the
 two leading original frames, explains the difference, and shows the face regions
-side by side. You can inspect other faces and pick either frame. A close call or
+side by side. Switch between **Face detail**, **100%**, and **Whole photos**,
+inspect other faces, or pick either frame. A close call or
 a conflict with the ordinary culling suggestion leaves the finalists for review.
 
 Face correspondence uses positions within this burst and checks the color below
