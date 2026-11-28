@@ -106,8 +106,15 @@ public struct PhotoAnalyzer: Sendable {
     // MARK: - Faces
 
     private func detectFaces(handler: VNImageRequestHandler, imageSize: CGSize, gray: GrayImage, warnings: inout [String]) -> [FaceInfo] {
+        // The rectangles request supplies head pose (yaw/pitch/roll), which the eye
+        // assessment needs before it can call a frontal face's closed eyes a blink.
+        let rectanglesRequest = VNDetectFaceRectanglesRequest()
         let landmarksRequest = VNDetectFaceLandmarksRequest()
-        do { try handler.perform([landmarksRequest]) }
+        do {
+            try handler.perform([rectanglesRequest])
+            landmarksRequest.inputFaceObservations = rectanglesRequest.results
+            try handler.perform([landmarksRequest])
+        }
         catch { warnings.append("Face analysis unavailable: \(error.localizedDescription)"); return [] }
         guard let observations = landmarksRequest.results, !observations.isEmpty else { return [] }
 
