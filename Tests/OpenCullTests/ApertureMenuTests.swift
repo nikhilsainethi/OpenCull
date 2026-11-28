@@ -9,7 +9,7 @@ final class ApertureMenuTests: XCTestCase {
     func testBladeZeroSitsAtTheTopAndBladesRunClockwise() {
         let angles = (0..<6).map { index -> Double in
             let p = ApertureGeometry.labelPoint(index)
-            return atan2(Double(p.y), Double(p.x)) * 180 / .pi
+            return Darwin.atan2(Double(p.y), Double(p.x)) * 180 / .pi
         }
         XCTAssertEqual(angles[0], -90, accuracy: 0.5, "Blade 1 is straight up")
         for index in 1..<6 {
@@ -31,10 +31,10 @@ final class ApertureMenuTests: XCTestCase {
         let polygons = (0..<6).map { ApertureGeometry.bladePolygon($0, opening: ApertureGeometry.openRadius, arcSamples: 96) }
         let opening = ApertureGeometry.openingVertices(opening: ApertureGeometry.openRadius)
         var checked = 0
-        for x in stride(from: -146.0, through: 146, by: 7.3) {
-            for y in stride(from: -146.0, through: 146, by: 7.3) {
+        for x in stride(from: -146.0, through: 146.0, by: 7.3) {
+            for y in stride(from: -146.0, through: 146.0, by: 7.3) {
                 let point = CGPoint(x: x, y: y)
-                guard hypot(x, y) < 146, !ApertureGeometry.contains(opening, point) else { continue }
+                guard Darwin.hypot(x, y) < 146.0, !ApertureGeometry.contains(opening, point) else { continue }
                 XCTAssertEqual(polygons.filter { ApertureGeometry.contains($0, point) }.count, 1, "point \(point)")
                 checked += 1
             }

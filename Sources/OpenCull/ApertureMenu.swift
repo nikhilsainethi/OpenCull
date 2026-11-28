@@ -114,13 +114,13 @@ enum ApertureGeometry {
     /// remaining blades follow clockwise.
     static let rotation: Double = {
         let centroid = polygonCentroid(bladePolygon(0, opening: openRadius, rotation: 0))
-        return -Double.pi / 2 - atan2(Double(centroid.y), Double(centroid.x))
+        return -Double.pi / 2 - Darwin.atan2(Double(centroid.y), Double(centroid.x))
     }()
 
     static func openingVertices(opening: CGFloat, rotation: Double = rotation) -> [CGPoint] {
         (0..<bladeCount).map { k in
             let angle = rotation + Double(k) * step
-            return CGPoint(x: opening * cos(angle), y: opening * sin(angle))
+            return CGPoint(x: opening * CGFloat(Darwin.cos(angle)), y: opening * CGFloat(Darwin.sin(angle)))
         }
     }
 
@@ -139,8 +139,8 @@ enum ApertureGeometry {
     static func rimSpan(_ index: Int, opening: CGFloat = openRadius) -> (start: Double, end: Double) {
         let v = openingVertices(opening: opening)
         let p0 = rimPoint(index, vertices: v), p1 = rimPoint(index + 1, vertices: v)
-        let start = atan2(Double(p0.y), Double(p0.x))
-        var end = atan2(Double(p1.y), Double(p1.x))
+        let start = Darwin.atan2(Double(p0.y), Double(p0.x))
+        var end = Darwin.atan2(Double(p1.y), Double(p1.x))
         while end <= start { end += 2 * .pi }
         return (start, end)
     }
@@ -150,13 +150,13 @@ enum ApertureGeometry {
         let v = openingVertices(opening: opening, rotation: rotation)
         let k = index % bladeCount
         let p0 = rimPoint(k, vertices: v), p1 = rimPoint(k + 1, vertices: v)
-        let start = atan2(Double(p0.y), Double(p0.x))
-        var end = atan2(Double(p1.y), Double(p1.x))
+        let start = Darwin.atan2(Double(p0.y), Double(p0.x))
+        var end = Darwin.atan2(Double(p1.y), Double(p1.x))
         while end <= start { end += 2 * .pi }
         var points = [v[k], v[(k + 1) % bladeCount], p1]
         for i in 1..<arcSamples {
             let angle = end - (end - start) * Double(i) / Double(arcSamples)
-            points.append(CGPoint(x: radius * cos(angle), y: radius * sin(angle)))
+            points.append(CGPoint(x: radius * CGFloat(Darwin.cos(angle)), y: radius * CGFloat(Darwin.sin(angle))))
         }
         points.append(p0)
         return points
@@ -175,7 +175,7 @@ enum ApertureGeometry {
             for k in 0..<bladeCount where contains(bladePolygon(k, opening: openRadius), point) { return k }
         }
         // Beyond the rim (or on a sampled seam): use the rim arc each blade owns.
-        let angle = atan2(Double(point.y), Double(point.x))
+        let angle = Darwin.atan2(Double(point.y), Double(point.x))
         for k in 0..<bladeCount {
             let span = rimSpan(k)
             var a = angle
@@ -443,11 +443,13 @@ private struct ApertureLens: View {
                 let center = CGPoint(x: reach, y: reach)
                 for tick in 0..<72 {
                     let angle = Double(tick) * .pi / 36
+                    let cosAngle = CGFloat(Darwin.cos(angle))
+                    let sinAngle = CGFloat(Darwin.sin(angle))
                     let long = tick % 6 == 0
                     let inner = ApertureGeometry.radius + (long ? 3 : 6)
                     let outer = reach - 3
-                    path.move(to: CGPoint(x: center.x + inner * cos(angle), y: center.y + inner * sin(angle)))
-                    path.addLine(to: CGPoint(x: center.x + outer * cos(angle), y: center.y + outer * sin(angle)))
+                    path.move(to: CGPoint(x: center.x + inner * cosAngle, y: center.y + inner * sinAngle))
+                    path.addLine(to: CGPoint(x: center.x + outer * cosAngle, y: center.y + outer * sinAngle))
                 }
             }
             .stroke(Color.white.opacity(0.22), lineWidth: 1)

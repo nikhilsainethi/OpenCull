@@ -56,7 +56,7 @@ if [[ -f "$DMG" ]]; then
     MOUNT="$VERIFY_STAGE/dmg-mount"
     mkdir -p "$MOUNT"
     hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$MOUNT" "$DMG"
-    trap 'hdiutil detach -quiet "$MOUNT" >/dev/null 2>&1 || true; rm -rf "$VERIFY_STAGE"' EXIT
+    trap 'hdiutil detach -quiet "$MOUNT" >/dev/null 2>&1 || hdiutil detach -quiet -force "$MOUNT" >/dev/null 2>&1 || true; rm -rf "$VERIFY_STAGE"' EXIT
     test -L "$MOUNT/Applications"
     test "$(readlink "$MOUNT/Applications")" = "/Applications"
     DMG_APP="$MOUNT/OpenCull.app"
@@ -64,7 +64,7 @@ if [[ -f "$DMG" ]]; then
     codesign --verify --deep --strict "$DMG_APP"
     for ARCH in arm64 x86_64; do lipo "$DMG_APP/Contents/MacOS/OpenCull" -verify_arch "$ARCH"; done
     cmp "$DMG_APP/Contents/MacOS/OpenCull" "$BINARY"
-    hdiutil detach -quiet "$MOUNT"
+    hdiutil detach -quiet "$MOUNT" || hdiutil detach -quiet -force "$MOUNT"
     trap 'rm -rf "$VERIFY_STAGE"' EXIT
     echo "Verified disk image: Applications link, same signed universal app as the ZIP."
     shasum -a 256 "$ARCHIVE" "$DMG" "$CLI"
