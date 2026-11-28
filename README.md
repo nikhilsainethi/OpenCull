@@ -4,6 +4,10 @@
 shoot, review technical suggestions, compare frames at full resolution, develop
 selections and export finished copies. General-photography defaults are included.
 
+**[⬇ Download OpenCull 0.3.0 for macOS (.dmg)](https://github.com/nikhilsainethi/OpenCull/releases/download/v0.3.0/OpenCull-0.3.0-macOS.dmg)**
+
+For Apple Silicon and Intel Macs running macOS 14 or later.
+
 - **On your Mac:** analysis, preference adaptation, edits and rendering use Apple
   frameworks locally. No OpenCull account, API key or cloud AI service.
 - **Originals stay intact:** adjustments live in recipes. Exports create new files;
@@ -23,12 +27,10 @@ imitation of a proprietary editing or culling model.
 - **Build:** Xcode 16+ or equivalent Command Line Tools with a macOS 15+ SDK.
   A newer SDK can build the macOS 14 deployment target.
 
-When a release is published, download `OpenCull-0.3.0-macOS.dmg` from
-[Releases](https://github.com/nikhilsainethi/OpenCull/releases), open it and drag
-**OpenCull** onto **Applications**. The same universal app runs on Apple Silicon and
-Intel Macs. A ZIP of the app is published alongside for scripted installs. Builds are
-ad-hoc signed, **not notarized**: the first launch needs **System Settings → Privacy
-& Security → Open Anyway** (on macOS 14, Control-click → Open also works).
+Open the downloaded DMG and drag **OpenCull** onto **Applications**. This release
+uses ad-hoc signing. If macOS blocks the first launch, open **System Settings →
+Privacy & Security → Open Anyway**. The app ZIP and command-line tool are also
+available on the [Releases page](https://github.com/nikhilsainethi/OpenCull/releases).
 
 ```bash
 git clone https://github.com/nikhilsainethi/OpenCull.git
