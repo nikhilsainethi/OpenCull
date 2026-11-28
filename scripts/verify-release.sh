@@ -2,7 +2,7 @@
 # Read-only app ZIP/DMG/CLI validation. Never launches or installs software.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
-EXPECTED_VERSION="${3:-${VERSION:-0.3.0}}"
+EXPECTED_VERSION="${3:-${VERSION:-0.4.0}}"
 ARCHIVE="${1:-$REPO/dist/OpenCull-${EXPECTED_VERSION}-macOS.zip}"
 CLI="${2:-$REPO/dist/opencull-cli}"
 DMG="${4:-$REPO/dist/OpenCull-${EXPECTED_VERSION}-macOS.dmg}"

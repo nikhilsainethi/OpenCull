@@ -1,10 +1,10 @@
-# OpenCull 0.3
+# OpenCull 0.4
 
 **Native photo culling, comparison and nondestructive editing for macOS.** Open a
 shoot, review technical suggestions, compare frames at full resolution, develop
 selections and export finished copies. General-photography defaults are included.
 
-**[⬇ Download OpenCull 0.3.0 for macOS (.dmg)](https://github.com/nikhilsainethi/OpenCull/releases/download/v0.3.0/OpenCull-0.3.0-macOS.dmg)**
+**[⬇ Download OpenCull 0.4.0 for macOS (.dmg)](https://github.com/nikhilsainethi/OpenCull/releases/download/v0.4.0/OpenCull-0.4.0-macOS.dmg)**
 
 For Apple Silicon and Intel Macs running macOS 14 or later.
 
@@ -48,7 +48,7 @@ app plus an Applications link. Packaging never installs an app or publishes a re
 Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which tests, builds,
 verifies and publishes the DMG, ZIP and CLI as a GitHub Release. Previous generated outputs are preserved in `dist/.previous/`;
 unrelated `dist/` files are untouched. To change the numeric version, use
-`VERSION=0.3.1 ./scripts/build-app.sh` and `VERSION=0.3.1 ./scripts/verify-release.sh`.
+`VERSION=0.4.1 ./scripts/build-app.sh` and `VERSION=0.4.1 ./scripts/verify-release.sh`.
 For development, use `swift run OpenCull` or open `Package.swift` in Xcode.
 
 ## Import an album
@@ -131,6 +131,24 @@ gaze tracking, biometric identification or a trained blink model. Uncertain fram
 cannot become automatic group winners or target-count picks. Face-region focus
 protects supported portraits from background bokeh, but the app does not have
 universal subject segmentation or a proven intentional-blur classifier.
+
+### Best available for group portraits
+
+Choose **Posed group** in the shooting intent menu and open **Best available**
+on a group of similar photos. If an automatic grouping misses part of a burst,
+select its photos and use the album action to merge them. OpenCull compares the
+two leading original frames, explains the difference, and shows the face regions
+side by side. Switch between **Face detail**, **100%**, and **Whole photos**,
+inspect other faces, or pick either frame. A close call or
+a conflict with the ordinary culling suggestion leaves the finalists for review.
+
+Face correspondence uses positions within this burst and checks the color below
+each face to flag an unlikely match. Missing detections, uncertain gaze and
+ambiguous matches are shown for inspection. Crops use the original composition.
+For preview-only RAW files, the comparison labels the embedded preview or the
+companion photo it displays. The feature works offline and makes no face identity
+records. When you reopen a shoot from an
+older version, OpenCull refreshes its analysis and retains your saved decisions.
 
 ### Keyboard
 

@@ -69,12 +69,13 @@ public struct FaceInfo: Codable, Sendable, Equatable {
     /// Missing pupils, profiles and low support must remain unknown attention.
     public var leftPupilPosition: CGPoint?
     public var rightPupilPosition: CGPoint?
+    public var surroundingColor: BurstFaceContext?
 
     public init(boundingBox: CGRect, captureQuality: Float? = nil, eyeOpenness: Float? = nil, sharpness: Float? = nil,
                 leftEyeOpenness: Float? = nil, rightEyeOpenness: Float? = nil,
                 leftEyeConfidence: Float? = nil, rightEyeConfidence: Float? = nil,
                 yaw: Float? = nil, pitch: Float? = nil, roll: Float? = nil,
-                leftPupilPosition: CGPoint? = nil, rightPupilPosition: CGPoint? = nil) {
+                leftPupilPosition: CGPoint? = nil, rightPupilPosition: CGPoint? = nil, surroundingColor: BurstFaceContext? = nil) {
         self.boundingBox = boundingBox
         self.captureQuality = captureQuality
         self.eyeOpenness = eyeOpenness ?? [leftEyeOpenness, rightEyeOpenness].compactMap { $0 }.filter { $0.isFinite && (0...1).contains($0) }.max()
@@ -88,6 +89,7 @@ public struct FaceInfo: Codable, Sendable, Equatable {
         self.roll = roll
         self.leftPupilPosition = leftPupilPosition
         self.rightPupilPosition = rightPupilPosition
+        self.surroundingColor = surroundingColor
     }
 
     /// Faces smaller than this (as a fraction of image width) are too small for reliable
@@ -105,7 +107,7 @@ public struct FaceInfo: Codable, Sendable, Equatable {
 /// Everything measured about one photo. Expensive to compute, so it is cached.
 public struct PhotoAnalysis: Codable, Sendable, Equatable {
     /// Bump this when the analysis changes so old cached results are recomputed.
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public var version: Int = PhotoAnalysis.currentVersion
     public var pixelWidth: Int

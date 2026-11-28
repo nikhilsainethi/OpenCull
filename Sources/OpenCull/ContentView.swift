@@ -8,6 +8,7 @@ struct ContentView: View {
     @Environment(ApertureMenuState.self) private var aperture
     @State private var keyMonitor = KeyMonitor()
     @State private var exportSheet = false
+    @State private var burstReview: BurstReviewRequest?
     @State private var photoSelection: [PhotosPickerItem] = []
     @State private var importingPhotos = false
     @State private var importSheet = false
@@ -34,13 +35,13 @@ struct ContentView: View {
                         }.padding(10)
                         TextField("Search names, subjects, scenes…", text: $model.searchText)
                             .textFieldStyle(.roundedBorder).padding(.horizontal, 10).padding(.bottom, 8)
-                        GridView()
+                        GridView(reviewBurst: showBurstComparison)
                     }.frame(minWidth: 260, idealWidth: 350, maxWidth: 430)
                     VStack(spacing: 0) {
                         reviewBar
                         Divider()
                         if model.mode == .compare { CompareWorkspaceView() }
-                        else { DetailView() }
+                        else { DetailView(reviewBurst: showBurstComparison) }
                     }.frame(minWidth: 480, maxWidth: .infinity)
                     if model.mode == .edit { EditorPanel().frame(minWidth: 285, idealWidth: 315, maxWidth: 350) }
                 }
@@ -123,6 +124,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $importSheet) { ImportSourcesView(photoSelection: $photoSelection) }
         .sheet(isPresented: $exportSheet) { ExportSheet() }
+        .sheet(item: $burstReview) { request in BurstComparisonSheet(anchorID: request.id).environment(model) }
         .alert(item: $model.alert) { Alert(title: Text($0.title), message: Text($0.message)) }
         .onChange(of: photoSelection) { _, selection in
             guard !selection.isEmpty else { return }
@@ -168,7 +170,7 @@ struct ContentView: View {
             }
         }
         .onDisappear { photoImportTask?.cancel(); model.cancelImport(); keyMonitor.stop(); model.cancelDestinationSelection(); model.cancelOpening(); _ = model.flushPendingSaves() }
-        .onChange(of: importSheet || exportSheet) { _, sheetShown in
+        .onChange(of: importSheet || exportSheet || burstReview != nil) { _, sheetShown in
             aperture.isBlocked = sheetShown
             if sheetShown { aperture.dismiss() }
         }
@@ -179,6 +181,10 @@ struct ContentView: View {
             // A held Space key cannot be released into a window that lost focus.
             if (note.object as? NSWindow) === model.window { aperture.dismiss() }
         }
+    }
+
+    private func showBurstComparison(_ id: String) {
+        burstReview = BurstReviewRequest(id: id)
     }
 
     // MARK: - Aperture menu
@@ -328,6 +334,7 @@ struct ContentView: View {
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
+        guard burstReview == nil else { return false }
         if handleApertureKey(event) { return true }
         guard event.type == .keyDown else { return false }
         guard model.folder != nil, !model.isImporting, !model.isOpening, !model.isChoosingDestination, let reviewWindow = model.window, event.window === reviewWindow else { return false }

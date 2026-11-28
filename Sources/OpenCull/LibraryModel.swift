@@ -129,6 +129,8 @@ final class LibraryModel {
     @ObservationIgnored private var openingTask: Task<LoadedAlbum, Error>?
     @ObservationIgnored private var workspaceRevision = 0
     @ObservationIgnored private var indexByID: [String: Int] = [:]
+    private var burstRecommendations: [Int: BurstRecommendation] = [:]
+    @ObservationIgnored private var burstFirstIndex: [Int: Int] = [:]
     private var undoStack: [WorkspaceSnapshot] = []
     private var redoStack: [WorkspaceSnapshot] = []
     @ObservationIgnored private var lastEditKey: String?
@@ -208,6 +210,28 @@ final class LibraryModel {
     }
     func recipe(for item: PhotoItem) -> EditRecipe { records[item.id]?.recipe ?? .identity }
     func keyFace(for item: PhotoItem) -> Int? { records[item.id]?.keyFace }
+    func item(withID id: String) -> PhotoItem? {
+        indexByID[id].map { items[$0] }
+    }
+
+    func burstRecommendation(for itemID: String) -> BurstRecommendation? {
+        guard !isAnalyzing, let group = item(withID: itemID)?.groupID else { return nil }
+        return burstRecommendations[group]
+    }
+
+    func burstShotNumber(for itemID: String) -> Int? {
+        guard let index = indexByID[itemID], let group = items[index].groupID,
+              let first = burstFirstIndex[group] else { return nil }
+        return index - first + 1
+    }
+
+    func pickBurstPhoto(_ itemID: String, from anchorID: String) {
+        guard !isOpening, let result = burstRecommendation(for: anchorID),
+              itemID == result.winnerID || itemID == result.runnerUpID,
+              let photo = item(withID: itemID), photo.decision != .pick else { return }
+        setDecision(.pick, targets: [photo], advance: false)
+    }
+
     func groupMaxSharpness(for item: PhotoItem) -> Float? {
         guard let group = item.groupID, item.groupSize > 1 else { return nil }
         return items.filter { $0.groupID == group }.compactMap { $0.analysis?.subjectSharpness }.max()
@@ -572,7 +596,39 @@ final class LibraryModel {
             return $0.url.path.localizedStandardCompare($1.url.path) == .orderedAscending
         }
         indexByID = Dictionary(uniqueKeysWithValues: items.enumerated().map { ($1.id, $0) })
+        updateBurstRecommendations()
         layoutVersion &+= 1; reconcileSelection()
+    }
+
+    private func updateBurstRecommendations() {
+        burstRecommendations = [:]
+        burstFirstIndex = [:]
+        guard scoring.shootingIntent == .groupPortrait, !isAnalyzing,
+              !items.contains(where: { $0.analysis == nil && $0.analysisError == nil }) else { return }
+
+        // reevaluate() sorts by group and capture order. Each group is ranked once,
+        // so grid cells, filters and the comparison sheet share the same finalists.
+        var start = 0
+        while start < items.count {
+            let end = start + items[start].groupSize
+            defer { start = end }
+            guard end > start + 1, let group = items[start].groupID,
+                  let result = BurstRecommender.recommend(Array(items[start..<end]), options: scoring),
+                  let winner = indexByID[result.winnerID], let runner = indexByID[result.runnerUpID] else { continue }
+            burstRecommendations[group] = result
+            burstFirstIndex[group] = start
+            let oldBest = (start..<end).first { items[$0].isBestInGroup }
+            if result.isCloseCall || oldBest != winner {
+                // A fallback or disputed choice needs an explicit pick. Preserve both
+                // finalists through bulk acceptance and subsequent target-count culls.
+                for i in Set([winner, runner] + [oldBest].compactMap { $0 }) {
+                    items[i].suggestion = .undecided
+                    items[i].isBestInGroup = false
+                    items[i].issues.removeAll { $0 == .duplicate }
+                    items[i].reviewMessages.append("Compare the group portraits before choosing a pick.")
+                }
+            }
+        }
     }
     private func optionsChanged() {
         defaults.set(try? JSONEncoder().encode(grouping), forKey: "grouping")
@@ -791,6 +847,7 @@ final class LibraryModel {
             let key = id + "#" + fingerprint
             guard items[i].decision != .undecided else { examples.removeValue(forKey: key); continue }
             analysis.featurePrint = nil; analysis.layoutSignature = nil
+            for face in analysis.faces.indices { analysis.faces[face].surroundingColor = nil }
             examples[key] = PreferenceExample(analysis: analysis, decision: items[i].decision, rating: items[i].rating, updated: Date())
         }
         if examples.count > 2000 {
