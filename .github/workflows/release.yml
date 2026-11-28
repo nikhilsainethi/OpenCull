@@ -1,0 +1,33 @@
+name: Release
+
+# Push a version tag (for example v0.3.0) to build, verify and publish the universal
+# DMG and ZIP as a GitHub Release.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test
+        run: python3 scripts/test-with-diagnostics.py
+      - name: Build and verify universal release
+        run: VERSION="${GITHUB_REF_NAME#v}" ./scripts/build-app.sh
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/OpenCull-${VERSION}-macOS.dmg" \
+            "dist/OpenCull-${VERSION}-macOS.zip" \
+            "dist/opencull-cli" \
+            "dist/release-verification.txt" \
+            --title "OpenCull ${VERSION}" \
+            --notes-file .github/release-notes.md

@@ -5,6 +5,7 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(LibraryModel.self) private var model
+    @Environment(ApertureMenuState.self) private var aperture
     @State private var keyMonitor = KeyMonitor()
     @State private var exportSheet = false
     @State private var photoSelection: [PhotosPickerItem] = []
@@ -81,6 +82,10 @@ struct ContentView: View {
                 }.padding(24).frame(width: 340).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
+        .overlay {
+            ApertureMenuOverlay(menu: aperture, items: ApertureItem.items(for: aperture.page, model: model), onActivate: activateApertureItem)
+        }
+        .background(AperturePointerAnchor(menu: aperture))
         .background(WindowReader { model.window = $0 })
         .toolbar {
             ToolbarItem(placement: .navigation) {
@@ -163,6 +168,70 @@ struct ContentView: View {
             }
         }
         .onDisappear { photoImportTask?.cancel(); model.cancelImport(); keyMonitor.stop(); model.cancelDestinationSelection(); model.cancelOpening(); _ = model.flushPendingSaves() }
+        .onChange(of: importSheet || exportSheet) { _, sheetShown in
+            aperture.isBlocked = sheetShown
+            if sheetShown { aperture.dismiss() }
+        }
+        .onChange(of: model.isImporting || model.isOpening || model.isChoosingDestination) { _, busy in
+            if busy { aperture.dismiss() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { note in
+            // A held Space key cannot be released into a window that lost focus.
+            if (note.object as? NSWindow) === model.window { aperture.dismiss() }
+        }
+    }
+
+    // MARK: - Aperture menu
+
+    private var canOpenAperture: Bool {
+        !aperture.isBlocked && !model.isOpening && !model.isImporting && !model.isChoosingDestination
+    }
+
+    private func handleApertureKey(_ event: NSEvent) -> Bool {
+        guard let window = model.window, event.window === window else { return false }
+        guard let command = ApertureKeyCommand.interpret(
+            type: event.type, keyCode: event.keyCode, characters: event.charactersIgnoringModifiers,
+            modifiers: event.modifierFlags, isRepeat: event.type == .keyDown && event.isARepeat,
+            isPresented: aperture.isPresented, isHolding: aperture.isHolding,
+            isEditingText: window.firstResponder is NSText, canOpen: canOpenAperture) else { return false }
+        switch command {
+        case .toggle: aperture.toggleAtPointer()
+        case .beginHold: aperture.presentAtPointer(holding: true)
+        case .endHold: if let index = aperture.endHold() { activateApertureItem(index) }
+        case .back: aperture.back()
+        case .activateHighlighted: if let index = aperture.highlighted { activateApertureItem(index) }
+        case .move(let delta): aperture.moveHighlight(by: delta)
+        case .choose(let index): activateApertureItem(index)
+        case .swallow: break
+        }
+        return true
+    }
+
+    private func activateApertureItem(_ index: Int) {
+        let items = ApertureItem.items(for: aperture.page, model: model)
+        guard items.indices.contains(index) else { return }
+        let item = items[index]
+        guard item.isEnabled else { NSSound.beep(); return }
+        if item.action == .albumActions { aperture.showPage(.albumActions); return }
+        aperture.dismiss()
+        perform(item.action)
+    }
+
+    private func perform(_ action: ApertureAction) {
+        switch action {
+        case .importPhotos: importSheet = true
+        case .cull: model.mode = .cull
+        case .compare: model.mode = .compare; model.prepareComparison()
+        case .edit: model.mode = .edit
+        case .accept: model.acceptSuggestions()
+        case .albumActions: aperture.showPage(.albumActions)
+        case .mergeGroup: model.mergeSelectedGroup()
+        case .splitGroup: model.splitSelectedGroup()
+        case .resetGroups: model.resetGroups()
+        case .findDuplicates: model.findExactDuplicates()
+        case .suggestTarget: model.suggestTargetCount()
+        case .retryAnalysis: model.retryAnalysis()
+        }
     }
 
     private var albumBar: some View {
@@ -253,10 +322,14 @@ struct ContentView: View {
             }
             Text("P / X / U  Pick / reject / clear   ·   1–5  Stars   ·   B  Before / after   ·   ⌘Z  Undo")
                 .font(.caption).foregroundStyle(.secondary).padding(.top, 16)
+            Text("Hold Space or press ⌘K for the aperture menu")
+                .font(.caption.weight(.medium)).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, maxHeight: .infinity).padding(40)
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {
+        if handleApertureKey(event) { return true }
+        guard event.type == .keyDown else { return false }
         guard model.folder != nil, !model.isImporting, !model.isOpening, !model.isChoosingDestination, let reviewWindow = model.window, event.window === reviewWindow else { return false }
         if ReviewKeyboardNavigation.handleSelectAll(event, responder: event.window?.firstResponder, workspace: model.selectAllVisible) { return true }
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
@@ -333,7 +406,7 @@ final class KeyMonitor {
     private var token: Any?
     func start(_ handler: @escaping (NSEvent) -> Bool) {
         stop()
-        token = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in MainActor.assumeIsolated { handler(event) } ? nil : event }
+        token = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in MainActor.assumeIsolated { handler(event) } ? nil : event }
     }
     func stop() { if let token { NSEvent.removeMonitor(token) }; token = nil }
 }

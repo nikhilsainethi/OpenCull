@@ -1,12 +1,17 @@
 #!/bin/bash
-# Read-only app ZIP/CLI validation. Never launches or installs software.
+# Read-only app ZIP/DMG/CLI validation. Never launches or installs software.
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd -P)"
 EXPECTED_VERSION="${3:-${VERSION:-0.3.0}}"
 ARCHIVE="${1:-$REPO/dist/OpenCull-${EXPECTED_VERSION}-macOS.zip}"
 CLI="${2:-$REPO/dist/opencull-cli}"
+DMG="${4:-$REPO/dist/OpenCull-${EXPECTED_VERSION}-macOS.dmg}"
 if [[ ! -f "$ARCHIVE" || ! -f "$CLI" ]]; then
     echo "Missing release ZIP or CLI. Build first, or pass both paths." >&2
+    exit 2
+fi
+if [[ -n "${4:-}" && ! -f "$DMG" ]]; then
+    echo "Missing disk image: $DMG" >&2
     exit 2
 fi
 while IFS= read -r ENTRY; do
@@ -45,5 +50,25 @@ for EXECUTABLE in "$BINARY" "$CLI"; do
     done <<< "$MINIMUMS"
 done
 echo "Verified OpenCull $EXPECTED_VERSION: fresh extraction, bundle metadata, strict signatures, arm64 + x86_64, macOS 14 deployment target."
-shasum -a 256 "$ARCHIVE" "$CLI"
+if [[ -f "$DMG" ]]; then
+    # Mount read-only without opening Finder; the image must hold the same app plus an Applications link.
+    hdiutil verify -quiet "$DMG"
+    MOUNT="$VERIFY_STAGE/dmg-mount"
+    mkdir -p "$MOUNT"
+    hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$MOUNT" "$DMG"
+    trap 'hdiutil detach -quiet "$MOUNT" >/dev/null 2>&1 || true; rm -rf "$VERIFY_STAGE"' EXIT
+    test -L "$MOUNT/Applications"
+    test "$(readlink "$MOUNT/Applications")" = "/Applications"
+    DMG_APP="$MOUNT/OpenCull.app"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DMG_APP/Contents/Info.plist")" = "$EXPECTED_VERSION"
+    codesign --verify --deep --strict "$DMG_APP"
+    for ARCH in arm64 x86_64; do lipo "$DMG_APP/Contents/MacOS/OpenCull" -verify_arch "$ARCH"; done
+    cmp "$DMG_APP/Contents/MacOS/OpenCull" "$BINARY"
+    hdiutil detach -quiet "$MOUNT"
+    trap 'rm -rf "$VERIFY_STAGE"' EXIT
+    echo "Verified disk image: Applications link, same signed universal app as the ZIP."
+    shasum -a 256 "$ARCHIVE" "$DMG" "$CLI"
+else
+    shasum -a 256 "$ARCHIVE" "$CLI"
+fi
 echo "Ad-hoc signing verified. Gatekeeper notarization and execution on other hardware are separate checks."

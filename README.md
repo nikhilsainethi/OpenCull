@@ -23,10 +23,12 @@ imitation of a proprietary editing or culling model.
 - **Build:** Xcode 16+ or equivalent Command Line Tools with a macOS 15+ SDK.
   A newer SDK can build the macOS 14 deployment target.
 
-When an asset is published, download `OpenCull-0.3.0-macOS.zip` from
-[Releases](https://github.com/nikhilsainethi/OpenCull/releases), unzip it and move
-it to Applications yourself. Builds are ad-hoc signed, **not notarized**. macOS
-may require Control-click → Open or Privacy & Security → Open Anyway.
+When a release is published, download `OpenCull-0.3.0-macOS.dmg` from
+[Releases](https://github.com/nikhilsainethi/OpenCull/releases), open it and drag
+**OpenCull** onto **Applications**. The same universal app runs on Apple Silicon and
+Intel Macs. A ZIP of the app is published alongside for scripted installs. Builds are
+ad-hoc signed, **not notarized**: the first launch needs **System Settings → Privacy
+& Security → Open Anyway** (on macOS 14, Control-click → Open also works).
 
 ```bash
 git clone https://github.com/nikhilsainethi/OpenCull.git
@@ -37,9 +39,12 @@ swift test
 open dist/OpenCull.app
 ```
 
-Packaging creates a universal app, CLI and app ZIP in `dist/`, after staging and
-verification in a fresh system temporary directory. It never installs an app or
-publishes a release. Previous generated outputs are preserved in `dist/.previous/`;
+Packaging creates a universal app, a drag-to-install DMG, an app ZIP and the CLI in
+`dist/`, after staging and verification in a fresh system temporary directory. The
+verification mounts the DMG read-only and checks it holds the same signed universal
+app plus an Applications link. Packaging never installs an app or publishes a release.
+Pushing a `vX.Y.Z` tag runs `.github/workflows/release.yml`, which tests, builds,
+verifies and publishes the DMG, ZIP and CLI as a GitHub Release. Previous generated outputs are preserved in `dist/.previous/`;
 unrelated `dist/` files are untouched. To change the numeric version, use
 `VERSION=0.3.1 ./scripts/build-app.sh` and `VERSION=0.3.1 ./scripts/verify-release.sh`.
 For development, use `swift run OpenCull` or open `Package.swift` in Xcode.
@@ -131,6 +136,7 @@ Single keys apply during photo review, not text entry.
 
 | Key | Action |
 |---|---|
+| Hold Space / ⌘K | Aperture menu (see below) |
 | ← / → | Previous / next photo |
 | ↑ / ↓ | Previous / next logical group |
 | P / X / U | Pick / reject / clear selected decisions |
@@ -146,6 +152,26 @@ Single keys apply during photo review, not text entry.
 | ⇧⌘S | Synchronize XMP beside originals |
 | ⇧⌘E | Copy picked originals with current metadata |
 | ⌘, | Settings |
+
+### Aperture menu
+
+The aperture menu is a camera-lens iris whose six blades are commands. It only
+appears when you invoke it, at the mouse pointer:
+
+- **Hold Space**, point toward a blade and release to run it. Releasing in the lens
+  opening leaves the menu open.
+- **⌘K** (or **View → Aperture Menu**) opens it for clicking. Arrow keys move around
+  the iris, Return runs the highlighted blade and **1–6** run a blade directly.
+- **Esc** goes back or closes; clicking outside the lens closes it.
+
+| Main iris | Album actions iris |
+|---|---|
+| 1 Import · 2 Cull · 3 Compare · 4 Edit · 5 Accept · 6 Album actions | 1 Merge group · 2 Split group · 3 Reset groups · 4 Duplicates · 5 Target picks · 6 Retry analysis |
+
+Unavailable blades are dimmed and the lens opening explains why (for example, open an
+album first). The current workspace blade has an accent edge. With **Reduce motion**
+enabled, the iris appears without its opening animation. The menu does not open over
+sheets, while typing in a text field, or while an import is running.
 
 ## Develop photographs
 

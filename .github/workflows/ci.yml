@@ -38,6 +38,7 @@ jobs:
         with:
           name: OpenCull-0.3.0-macOS
           path: |
+            dist/OpenCull-0.3.0-macOS.dmg
             dist/OpenCull-0.3.0-macOS.zip
             dist/opencull-cli
             dist/release-verification.txt

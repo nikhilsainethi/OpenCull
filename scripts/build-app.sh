@@ -55,16 +55,29 @@ codesign --force --sign - "$CLI"
 codesign --verify --deep --strict "$APP"
 codesign --verify --strict "$CLI"
 ditto -c -k --keepParent --norsrc --noextattr --noqtn "$APP" "$ZIP"
-"$REPO/scripts/verify-release.sh" "$ZIP" "$CLI" "$RELEASE_VERSION" | tee "$ARTIFACTS/release-verification.txt"
+# Drag-to-install disk image: the app beside a link to /Applications.
+DMG="$ARTIFACTS/OpenCull-${RELEASE_VERSION}-macOS.dmg"
+DMG_ROOT="$STAGE/dmg-root"
+mkdir -p "$DMG_ROOT"
+ditto --norsrc --noextattr --noqtn "$APP" "$DMG_ROOT/OpenCull.app"
+ln -s /Applications "$DMG_ROOT/Applications"
+# hdiutil can briefly report "Resource busy" on hosted runners, so retry a few times.
+for ATTEMPT in 1 2 3; do
+    if hdiutil create -quiet -volname "OpenCull ${RELEASE_VERSION}" -srcfolder "$DMG_ROOT" -fs HFS+ -format UDZO -ov "$DMG"; then break; fi
+    if [[ "$ATTEMPT" -eq 3 ]]; then echo "hdiutil could not create the disk image." >&2; exit 1; fi
+    sleep 5
+done
+"$REPO/scripts/verify-release.sh" "$ZIP" "$CLI" "$RELEASE_VERSION" "$DMG" | tee "$ARTIFACTS/release-verification.txt"
 DIST="$REPO/dist"
 mkdir -p "$DIST"
 INCOMING="$(mktemp -d "$DIST/.incoming.XXXXXX")"
 ditto --norsrc --noextattr --noqtn "$APP" "$INCOMING/OpenCull.app"
 cp -X "$CLI" "$INCOMING/opencull-cli"
 cp -X "$ZIP" "$INCOMING/$(basename "$ZIP")"
+cp -X "$DMG" "$INCOMING/$(basename "$DMG")"
 cp -X "$ARTIFACTS/release-verification.txt" "$INCOMING/release-verification.txt"
 BACKUP=""
-for NAME in OpenCull.app opencull-cli "$(basename "$ZIP")" release-verification.txt; do
+for NAME in OpenCull.app opencull-cli "$(basename "$ZIP")" "$(basename "$DMG")" release-verification.txt; do
     if [[ -e "$DIST/$NAME" || -L "$DIST/$NAME" ]]; then
         if [[ -z "$BACKUP" ]]; then
             mkdir -p "$DIST/.previous"
@@ -77,8 +90,10 @@ done
 rmdir "$INCOMING"
 INCOMING=""
 cmp "$ZIP" "$DIST/$(basename "$ZIP")"
+cmp "$DMG" "$DIST/$(basename "$DMG")"
 echo "Built and verified OpenCull $RELEASE_VERSION:"
 echo "  $DIST/OpenCull.app"
+echo "  $DIST/$(basename "$DMG")"
 echo "  $DIST/$(basename "$ZIP")"
 echo "  $DIST/opencull-cli"
 if [[ -n "$BACKUP" ]]; then echo "Previous generated outputs preserved at $BACKUP"; fi
