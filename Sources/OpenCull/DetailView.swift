@@ -3,6 +3,7 @@ import SwiftUI
 
 struct DetailView: View {
     @Environment(LibraryModel.self) private var model
+    let reviewBurst: (String) -> Void
 
     var body: some View {
         if let item = model.selectedItem {
@@ -15,7 +16,7 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Divider()
                 ScrollView {
-                    InfoPanel(item: item, groupMaxSharpness: model.groupMaxSharpness(for: item))
+                    InfoPanel(item: item, groupMaxSharpness: model.groupMaxSharpness(for: item), reviewBurst: reviewBurst)
                         .padding(14)
                 }
                 .frame(height: 250)
@@ -30,6 +31,7 @@ private struct InfoPanel: View {
     @Environment(LibraryModel.self) private var model
     let item: PhotoItem
     let groupMaxSharpness: Float?
+    let reviewBurst: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -53,6 +55,10 @@ private struct InfoPanel: View {
                 ratingControl
                 Spacer()
                 suggestionText
+                if model.burstRecommendation(for: item.id) != nil {
+                    Button("Best available…") { reviewBurst(item.id) }
+                        .help("Compare the leading shots and inspect their faces")
+                }
             }
 
             if let error = item.analysisError {
@@ -131,7 +137,7 @@ private struct InfoPanel: View {
     private var suggestionText: some View {
         switch item.suggestion {
         case .pick:
-            Label(item.isBestInGroup ? "Suggested pick · best of \(item.groupSize)" : "Suggested pick", systemImage: "wand.and.stars")
+            Label(item.isBestInGroup && model.burstRecommendation(for: item.id) == nil ? "Suggested pick · best of \(item.groupSize)" : "Suggested pick", systemImage: "wand.and.stars")
                 .foregroundStyle(.green)
         case .reject:
             Label("Suggested reject", systemImage: "wand.and.stars").foregroundStyle(.red)

@@ -1,3 +1,10 @@
+## Best available for group portraits
+
+Select **Posed group** and open **Best available** on a burst. Compare the two
+leading frames, read why one edged ahead, and inspect the relevant faces side
+by side. Pick either frame. Close calls remain available for manual review.
+All analysis and image display run on your Mac.
+
 ## Install
 
 1. Download **OpenCull-…-macOS.dmg** below. It is one universal app for Apple Silicon and Intel Macs running macOS 14 Sonoma or newer.

@@ -4,6 +4,7 @@ import SwiftUI
 
 struct GridView: View {
     @Environment(LibraryModel.self) private var model
+    let reviewBurst: (String) -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -18,6 +19,9 @@ struct GridView: View {
                                     .onTapGesture { model.select(item.id, extending: !NSEvent.modifierFlags.intersection([.command, .shift]).isEmpty) }
                                     .contextMenu {
                                         Button("Edit photo") { model.select(item.id); model.mode = .edit }
+                                        if model.burstRecommendation(for: item.id) != nil {
+                                            Button("Best available…") { reviewBurst(item.id) }
+                                        }
                                         Button("Compare this group") { model.select(item.id); model.mode = .compare; model.prepareComparison() }
                                         Divider()
                                         Button("Pick") { model.select(item.id); model.setDecision(.pick) }
@@ -28,7 +32,7 @@ struct GridView: View {
                             }
                         } header: {
                             if let title = section.title {
-                                SectionHeader(title: title)
+                                SectionHeader(title: title, anchor: section.items.first?.id, reviewBurst: reviewBurst)
                             }
                         }
                     }
@@ -52,13 +56,21 @@ struct GridView: View {
 }
 
 private struct SectionHeader: View {
+    @Environment(LibraryModel.self) private var model
     let title: String
+    let anchor: String?
+    let reviewBurst: (String) -> Void
 
     var body: some View {
         HStack {
             Image(systemName: "square.stack.3d.up")
             Text(title).font(.headline)
             Spacer()
+            if let anchor, model.burstRecommendation(for: anchor) != nil {
+                Button("Best available…") { reviewBurst(anchor) }
+                    .controlSize(.small)
+                    .help("Compare the leading shots and inspect their faces")
+            }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
@@ -72,6 +84,7 @@ struct PhotoCell: View {
     let isSelected: Bool
 
     var body: some View {
+        let recommendation = model.burstRecommendation(for: item.id)
         VStack(spacing: 6) {
             PhotoImageView(item: item, size: 360, recipe: model.recipe(for: item))
                 .frame(height: 130)
@@ -80,7 +93,11 @@ struct PhotoCell: View {
                 .opacity(item.decision == .reject ? 0.4 : 1)
                 .overlay(alignment: .topLeading) { DecisionBadge(item: item).padding(4) }
                 .overlay(alignment: .topTrailing) {
-                    if item.isBestInGroup {
+                    if let recommendation, recommendation.winnerID == item.id {
+                        Text(recommendation.isCloseCall ? "Close call" : "Best available")
+                            .font(.caption.weight(.semibold)).padding(.horizontal, 6).padding(.vertical, 3)
+                            .foregroundStyle(.white).background(.black.opacity(0.75), in: Capsule()).padding(4)
+                    } else if item.isBestInGroup && recommendation == nil {
                         Label("Best", systemImage: "crown.fill")
                             .labelStyle(.iconOnly)
                             .font(.caption)

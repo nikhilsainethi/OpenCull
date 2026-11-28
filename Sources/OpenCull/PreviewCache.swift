@@ -4,7 +4,8 @@ import SwiftUI
 
 private final class ImageBox {
     let image: CGImage
-    init(_ image: CGImage) { self.image = image }
+    let source: PreviewSource
+    init(_ image: CGImage, source: PreviewSource) { self.image = image; self.source = source }
 }
 
 enum PreviewResult {
@@ -12,11 +13,29 @@ enum PreviewResult {
     case failure(String)
 }
 
+enum PreviewSource: Equatable {
+    case original, embeddedRaw, limitedRaw(Int), companion(String)
+
+    var caption: String? {
+        switch self {
+        case .original: return nil
+        case .embeddedRaw: return "Embedded RAW preview"
+        case .limitedRaw(let limit): return "Embedded RAW preview · up to \(limit) px"
+        case .companion(let name): return "Companion · " + name
+        }
+    }
+}
+
+struct SourcedPreview {
+    let result: PreviewResult
+    let source: PreviewSource
+}
+
 /// Versioned, bounded, coalesced previews. Edits and full-resolution views share the export renderer.
 actor PreviewCache {
     static let shared = PreviewCache()
     private let cache = NSCache<NSString, ImageBox>()
-    private var pending: [String: Task<PreviewResult, Never>] = [:]
+    private var pending: [String: Task<SourcedPreview, Never>] = [:]
     init() { cache.totalCostLimit = 512 * 1024 * 1024 }
 
     nonisolated static func versionKey(for item: PhotoItem, size: Int, recipe: EditRecipe = .identity) -> String {
@@ -38,24 +57,49 @@ actor PreviewCache {
         return nil
     }
 
+    func burstPreview(for item: PhotoItem, size: Int) async -> SourcedPreview {
+        await load(item, size: size, recipe: .identity, preferRawPreview: ImageLoader.isRaw(item.url))
+    }
+
     func result(for item: PhotoItem, size: Int, recipe: EditRecipe = .identity) async -> PreviewResult {
-        let key = Self.versionKey(for: item, size: size, recipe: recipe)
-        if let hit = cache.object(forKey: key as NSString) { return .image(hit.image) }
+        await load(item, size: size, recipe: recipe, preferRawPreview: false).result
+    }
+
+    private func load(_ item: PhotoItem, size: Int, recipe: EditRecipe, preferRawPreview: Bool) async -> SourcedPreview {
+        let key = Self.versionKey(for: item, size: size, recipe: recipe) + (preferRawPreview ? "#burst" : "")
+        if let hit = cache.object(forKey: key as NSString) { return SourcedPreview(result: .image(hit.image), source: hit.source) }
         if let job = pending[key] { return await job.value }
-        let files = item.allFiles
-        let job = Task.detached(priority: .userInitiated) { () -> PreviewResult in
+        let job = Task.detached(priority: .userInitiated) { () -> SourcedPreview in
+            var files = item.allFiles
+            // Vision examines the primary RAW preview first. Using a companion
+            // ahead of it could center the face on a different camera crop.
+            if preferRawPreview && !ImageLoader.supportsFullRawDecoding(url: item.url) {
+                // ImageIO may synthesize a thumbnail when the container has none.
+                // Bound simultaneous review decodes and identify a capped representation.
+                let limit = size > 0 ? size : 8192
+                if let embedded = ImageLoader.loadImage(url: item.url, maxPixelSize: limit) {
+                    let source: PreviewSource = size == 0 && max(embedded.width, embedded.height) >= limit
+                        ? .limitedRaw(limit) : .embeddedRaw
+                    return SourcedPreview(result: .image(embedded), source: source)
+                }
+                files = item.companions.first { !ImageLoader.isRaw($0) }.map { [$0] } ?? []
+            }
             var lastError = "Could not decode this photo."
             for file in files {
-                do { return .image(try PhotoEditor.render(url: file, recipe: recipe, maxPixelSize: size > 0 ? size : nil)) }
-                catch { lastError = error.localizedDescription }
+                do {
+                    let image = try PhotoEditor.render(url: file, recipe: recipe, maxPixelSize: size > 0 ? size : nil)
+                    return SourcedPreview(result: .image(image), source: file == item.url ? .original : .companion(file.lastPathComponent))
+                } catch { lastError = error.localizedDescription }
             }
-            return .failure(lastError)
+            return SourcedPreview(result: .failure(lastError), source: .original)
         }
         pending[key] = job
-        let result = await job.value
+        let preview = await job.value
         pending.removeValue(forKey: key)
-        if case .image(let image) = result { cache.setObject(ImageBox(image), forKey: key as NSString, cost: image.width * image.height * 4) }
-        return result
+        if case .image(let image) = preview.result {
+            cache.setObject(ImageBox(image, source: preview.source), forKey: key as NSString, cost: image.width * image.height * 4)
+        }
+        return preview
     }
 }
 

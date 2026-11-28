@@ -10,17 +10,24 @@ struct ZoomablePhotoView: View {
     let zoom: ZoomMode
     var showFaceBoxes = false
     var keyFace: Int?
+    var centerAtActualSize = false
+    var inspectingBurst = false
     @Environment(LibraryModel.self) private var model
     @State private var image: CGImage?
     @State private var error: String?
+    @State private var representation = PreviewSource.original
     @State private var loadedKey: String?
 
     private var hasGeometryEdits: Bool { recipe.crop != nil || recipe.rotation != 0 }
     private var size: Int { zoom == .fit ? 2400 : 0 }
-    private var renderKey: String { PreviewCache.versionKey(for: item, size: size, recipe: recipe) }
+    private var renderKey: String {
+        PreviewCache.versionKey(for: item, size: size, recipe: recipe) + (inspectingBurst ? "#burst-review" : "")
+    }
     private var focusFace: CGRect? {
+        guard zoom != .actual || centerAtActualSize else { return nil }
         guard !hasGeometryEdits, let analysis = item.analysis else { return nil }
         if let keyFace, analysis.faces.indices.contains(keyFace) { return analysis.faces[keyFace].boundingBox }
+        if centerAtActualSize { return nil }
         return (analysis.significantFaces.isEmpty ? analysis.faces : analysis.significantFaces)
             .max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }?.boundingBox
     }
@@ -38,8 +45,8 @@ struct ZoomablePhotoView: View {
             } else {
                 ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            if image != nil {
-                Text(reviewHint)
+            if image != nil, loadedKey == renderKey {
+                Text([representation.caption, reviewHint].compactMap { $0 }.joined(separator: " · "))
                     .font(.caption).foregroundStyle(.white.opacity(0.85))
                     .padding(.horizontal, 8).padding(.vertical, 5)
                     .background(.black.opacity(0.65), in: RoundedRectangle(cornerRadius: 5))
@@ -48,9 +55,15 @@ struct ZoomablePhotoView: View {
         }
         .task(id: renderKey) {
             let key = renderKey
-            let loaded = await PreviewCache.shared.result(for: item, size: size, recipe: recipe)
+            let loaded: SourcedPreview
+            if inspectingBurst {
+                loaded = await PreviewCache.shared.burstPreview(for: item, size: size)
+            } else {
+                loaded = SourcedPreview(result: await PreviewCache.shared.result(for: item, size: size, recipe: recipe), source: .original)
+            }
             guard !Task.isCancelled else { return }
-            switch loaded {
+            representation = loaded.source
+            switch loaded.result {
             case .image(let decoded): image = decoded; error = nil
             case .failure(let message): image = nil; error = message
             }
@@ -88,10 +101,20 @@ enum PhotoViewportGeometry {
         let y = zoom == .fit ? (canvas.height - rendered.height) / 2 : ((canvas.height - rendered.height) / 2 * grid).rounded() / grid
         let imageRect = CGRect(x: x, y: y,
                                width: rendered.width, height: rendered.height)
-        let focus = zoom == .face ? face?.center : nil
+        let focus = zoom == .fit ? nil : face?.center
         let center = CGPoint(x: imageRect.minX + (focus?.x ?? 0.5) * imageRect.width,
                              y: imageRect.minY + (focus?.y ?? 0.5) * imageRect.height)
         return (canvas, imageRect, center)
+    }
+
+    static func scrollOrigin(center: CGPoint, canvas: CGSize, viewport: CGSize, backingScale: CGFloat) -> CGPoint {
+        let scale = max(1, backingScale)
+        func offset(_ focus: CGFloat, _ extent: CGFloat, _ visible: CGFloat) -> CGFloat {
+            let available = max(0, ((extent - visible) * scale).rounded(.down))
+            return min(available, max(0, ((focus - visible / 2) * scale).rounded())) / scale
+        }
+        return CGPoint(x: offset(center.x, canvas.width, viewport.width),
+                       y: offset(center.y, canvas.height, viewport.height))
     }
 }
 
@@ -158,9 +181,9 @@ private final class PhotoScrollView: NSScrollView {
         canvas.setFrameSize(layout.canvas); canvas.imageRect = layout.imageRect
         let center = needsCenter ? layout.center : CGPoint(x: layout.imageRect.minX + relative.x * layout.imageRect.width,
                                                             y: layout.imageRect.minY + relative.y * layout.imageRect.height)
-        let x = max(0, min(layout.canvas.width - viewport.width, center.x - viewport.width / 2))
-        let y = max(0, min(layout.canvas.height - viewport.height, center.y - viewport.height / 2))
-        contentView.scroll(to: CGPoint(x: x, y: y)); reflectScrolledClipView(contentView)
+        let origin = PhotoViewportGeometry.scrollOrigin(center: center, canvas: layout.canvas, viewport: viewport,
+                                                       backingScale: window?.backingScaleFactor ?? 1)
+        contentView.scroll(to: origin); reflectScrolledClipView(contentView)
         needsCenter = false
     }
 }

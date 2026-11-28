@@ -21,6 +21,7 @@ public enum AnalysisError: Error, LocalizedError {
 /// Measures one photo: sharpness, exposure, faces/eyes, aesthetics and a similarity embedding.
 /// Everything runs on-device with ImageIO and Apple's Vision framework.
 public struct PhotoAnalyzer: Sendable {
+    static let faceDetectionFailurePrefix = "Face analysis unavailable: "
     public var options: AnalyzerOptions
 
     public init(options: AnalyzerOptions = AnalyzerOptions()) {
@@ -55,7 +56,7 @@ public struct PhotoAnalyzer: Sendable {
         if noise > 10 { warnings.append("High image noise or fine texture: inspect focus at 100% before accepting.") }
 
         let handler = VNImageRequestHandler(cgImage: image, orientation: .up, options: [:])
-        let faces = detectFaces(handler: handler, imageSize: CGSize(width: image.width, height: image.height), gray: gray, warnings: &warnings)
+        let faces = detectFaces(handler: handler, image: image, gray: gray, warnings: &warnings)
 
         // Keep a soft second significant person from being hidden by a sharper larger face.
         let subjectSharpness = faces.filter(\.isSignificant).compactMap(\.sharpness).min() ?? sharpness
@@ -105,7 +106,7 @@ public struct PhotoAnalyzer: Sendable {
 
     // MARK: - Faces
 
-    private func detectFaces(handler: VNImageRequestHandler, imageSize: CGSize, gray: GrayImage, warnings: inout [String]) -> [FaceInfo] {
+    private func detectFaces(handler: VNImageRequestHandler, image: CGImage, gray: GrayImage, warnings: inout [String]) -> [FaceInfo] {
         // The rectangles request supplies head pose (yaw/pitch/roll), which the eye
         // assessment needs before it can call a frontal face's closed eyes a blink.
         let rectanglesRequest = VNDetectFaceRectanglesRequest()
@@ -115,7 +116,7 @@ public struct PhotoAnalyzer: Sendable {
             landmarksRequest.inputFaceObservations = rectanglesRequest.results
             try handler.perform([landmarksRequest])
         }
-        catch { warnings.append("Face analysis unavailable: \(error.localizedDescription)"); return [] }
+        catch { warnings.append(Self.faceDetectionFailurePrefix + error.localizedDescription); return [] }
         guard let observations = landmarksRequest.results, !observations.isEmpty else { return [] }
 
         let qualityRequest = VNDetectFaceCaptureQualityRequest()
@@ -124,6 +125,8 @@ public struct PhotoAnalyzer: Sendable {
         catch { warnings.append("Face quality unavailable: \(error.localizedDescription)") }
         let qualityResults = qualityRequest.results ?? []
         let smooth = gray.denoised()
+        let imageSize = CGSize(width: image.width, height: image.height)
+        let context = BurstContextSampler(image: image)
 
         return observations.map { face in
             let box = face.boundingBox // normalized, origin bottom-left
@@ -152,7 +155,8 @@ public struct PhotoAnalyzer: Sendable {
             return FaceInfo(boundingBox: topLeftBox, captureQuality: quality, eyeOpenness: openness, sharpness: sharpness,
                 leftEyeOpenness: left, rightEyeOpenness: right, leftEyeConfidence: leftConfidence, rightEyeConfidence: rightConfidence,
                 yaw: face.yaw?.floatValue, pitch: face.pitch?.floatValue, roll: face.roll?.floatValue,
-                leftPupilPosition: leftPupil, rightPupilPosition: rightPupil)
+                leftPupilPosition: leftPupil, rightPupilPosition: rightPupil,
+                surroundingColor: context?.color(below: topLeftBox))
         }
     }
 
